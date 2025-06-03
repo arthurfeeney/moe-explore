@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import List
+from expert_permute import GroupedTokens
 
 DEVICE = 'cuda'
 
@@ -13,45 +14,34 @@ def num_sms():
         return torch.cuda.get_device_properties("cuda").multi_processor_count
     return 148
 
+configs = [
+    # M, N, K, warps, stages
+    (128, 128, 128, 4, 4),
+    (128, 128, 64, 4, 4),
+    (128, 128, 32, 4, 4),
+    (256, 256, 64, 4, 4),
+    (64, 128, 128, 4, 4),
+    (128, 128, 128, 8, 4),
+    (256, 256, 64, 8, 4),
+    (64, 64, 128, 4, 4),
+    (64, 64, 256, 4, 4),
+    (128, 64, 256, 4, 4)
+]
+
+configs = [
+    triton.Config({
+        'BLOCK_SIZE_M': c[0],
+        'BLOCK_SIZE_N': c[1],
+        'BLOCK_SIZE_K': c[2],
+        'num_warps': c[3],
+        'num_stages': c[4],
+        'NUM_SM': num_sms()
+    }) for c in configs
+]
+
+
 @triton.autotune(
-    configs=[
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 64,
-            'NUM_SM': num_sms(),
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 64,
-            'NUM_SM': num_sms(),
-        }),
-    ],
+    configs=configs,
     key=['group_size'],
 )
 @triton.jit
@@ -115,13 +105,11 @@ def grouped_matmul_kernel(
                 # hint to Triton compiler to do proper loop pipelining
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
-                
-                k_mask = kk + offs_k < gk
-                a_mask = m_mask[:, None] and k_mask[None, :]
-                b_mask = k_mask[:, None] and n_mask[None, :]
-                
-                a = tl.load(a_ptrs, mask=a_mask)
-                b = tl.load(b_ptrs, mask=b_mask)
+            
+                k_mask = kk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K) < k
+                                
+                a = tl.load(a_ptrs, mask=m_mask[:, None] and k_mask)
+                b = tl.load(b_ptrs, mask=k_mask[:, None] and n_mask)
                 accumulator += tl.dot(a, b)
                 a_ptrs += BLOCK_SIZE_K
                 b_ptrs += BLOCK_SIZE_K * ldb
@@ -131,8 +119,7 @@ def grouped_matmul_kernel(
             offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
 
-            c_mask = m_mask[:, None] and n_mask[None, :]
-            tl.store(c_ptrs, c, mask=c_mask)
+            tl.store(c_ptrs, c, mask=m_mask[:, None] and n_mask)
 
             # go to the next tile by advancing NUM_SM
             tile_idx += NUM_SM
@@ -140,32 +127,53 @@ def grouped_matmul_kernel(
         # get ready to go to the next gemm problem
         last_problem_end = last_problem_end + num_tiles
 
+def get_a_addrs(group_A: GroupedTokens, group_size: int):
+    a_addrs = []
+    a_shapes = []
+    for i in range(group_size):
+        end_idx = group_A.tokens_per_expert_range[i]
+        start_idx = 0 if i == 0 else group_A.tokens_per_expert_range[i - 1]
+        a_addrs.append(group_A.tokens[start_idx:-1].data_ptr())
+        M = end_idx - start_idx
+        K = group_A.tokens.size(-1)
+        a_shapes.append((M, K))
+    return a_addrs, a_shapes
+        
+def get_b_addrs(group_B: torch.Tensor, group_size: int):
+    b_addrs = []
+    b_shapes = []
+    for i in range(group_size):
+        b_addrs.append(group_B[i].data_ptr())
+        K = group_B[i].size(0)
+        N = group_B[i].size(1)
+        b_shapes.append((K, N))
+    return b_addrs, b_shapes
 
-def group_gemm_fn(group_A: List[torch.Tensor], group_B: List[torch.Tensor]):
-    assert len(group_A) == len(group_B)
-    group_size = len(group_A)
-
-    A_addrs = []
-    B_addrs = []
+def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
+    group_size = group_B.size(0)
+    
+    A_addrs, A_shapes = get_a_addrs(group_A, group_size)
+    B_addrs, B_shapes = get_b_addrs(group_B, group_size)
+    
     C_addrs = []
     g_sizes = []
     g_lds = []
-    group_C = []
+    
+    assert (sum([s[0] for s in A_shapes]) == group_A.tokens.size(0))
+    
+    c = torch.ones((group_A.tokens.size(0), group_B.size(-1)), device=DEVICE, dtype=group_A.tokens.dtype)
+    
+    c_offset = 0
     for i in range(group_size):
-        A = group_A[i]
-        B = group_B[i]
-        assert A.shape[1] == B.shape[0]
-        M, K = A.shape
-        K, N = B.shape
+        assert A_shapes[i][1] == B_shapes[i][0]
+        M, K = A_shapes[i]
+        K, N = B_shapes[i]
         
-        C = torch.empty((M, N), device=DEVICE, dtype=A.dtype)
-        group_C.append(C)
-        A_addrs.append(A.data_ptr())
-        B_addrs.append(B.data_ptr())
-        C_addrs.append(C.data_ptr())
+        C_addrs.append(c[c_offset:].data_ptr())
         g_sizes += [M, N, K]
-        g_lds += [A.stride(0), B.stride(0), C.stride(0)]
-        
+        g_lds += [K, N, c.stride(0)]
+        c_offset += M
+                
     # note these are device tensors
     d_a_ptrs = torch.tensor(A_addrs, device=DEVICE)
     d_b_ptrs = torch.tensor(B_addrs, device=DEVICE)
@@ -182,5 +190,16 @@ def group_gemm_fn(group_A: List[torch.Tensor], group_B: List[torch.Tensor]):
         d_g_lds,
         group_size,
     )
-
-    return group_C
+    
+    print(group_A.tokens)
+    print(c)
+    
+    assert torch.allclose(group_A.tokens, c)
+        
+    return GroupedTokens(
+        tokens=c,
+        tokens_per_expert_range=group_A.tokens_per_expert_range,
+        indices=group_A.indices,
+        token_gather_indices=group_A.token_gather_indices,
+        group_size=group_size
+    )

@@ -7,7 +7,7 @@ configs = []
 configs.append(
     Benchmark(
         x_names=["M"],
-        x_vals=[128, 512, 1024, 2048, 4096],
+        x_vals=[512, 1024, 2048, 4096, 8192],
         line_arg="provider",
         line_vals=["group", "torch", "peak"],
         line_names=["Triton Group GEMM", "Torch GEMM", "A30 [peak]"],
@@ -28,25 +28,30 @@ configs.append(
 def benchmark_parallel_experts_forward(
     num_groups,
     M, 
-    N, 
+    N,
     K,
     provider,
     device,
     dtype
-):  
+):
     quantiles = [0.2, 0.5, 0.8]
     if provider == "peak":
-        return 165 # A30 is 165 TFLOPS
+        device_name = torch.cuda.get_device_name()
+        print(device_name)
+        if "A100" in device_name:
+            return 312
+        if "A30" in device_name: 
+           return 165
     elif provider == "group":
         group_A = [torch.randn((M, K), dtype=dtype, device=device) for _ in range(num_groups)]
         group_B = [torch.randn((K, N), dtype=dtype, device=device) for _ in range(num_groups)]
         ms, min_ms, max_ms = do_bench(lambda: group_gemm_fn(group_A, group_B), quantiles=quantiles)
-        flops = num_groups * M * N * K
+        flops = num_groups * 2 * M * N * K
     elif provider == "torch":
-        A = torch.randn((M, K), dtype=dtype, device=device)
-        B = torch.randn((K, N), dtype=dtype, device=device)
+        A = torch.randn((num_groups, M, K), dtype=dtype, device=device)
+        B = torch.randn((num_groups, K, N), dtype=dtype, device=device)
         ms, min_ms, max_ms = do_bench(lambda: A @ B, quantiles=quantiles)
-        flops = M * N * K
+        flops = num_groups * 2 * M * N * K
 
     tflops = flops * 1e-12 / (ms * 1e-3)
     return tflops

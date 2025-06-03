@@ -31,13 +31,10 @@ class ExpertsGroupGEMM(nn.Module):
         self.weights2 = nn.Parameter(make_identity_experts(num_experts, hidden_dim, output_dim))
         self.act = torch.nn.functional.gelu
 
-    def forward(self, group_token):
-        group_weights1 = [w for w in self.weights1]
-        group_weights2 = [w for w in self.weights2]
-                
-        group_token = group_gemm_fn(group_token, group_weights1)
-        group_token = [self.act(t) for t in group_token] # TODO: fuse into group gemm.
-        group_token = group_gemm_fn(group_token, group_weights2)
+    def forward(self, group_token):     
+        group_token = group_gemm_fn(group_token, self.weights1)
+        group_token.tokens = self.act(group_token.tokens)
+        group_token = group_gemm_fn(group_token, self.weights2)
         
         return group_token
 
@@ -50,9 +47,9 @@ class MoEGroupGEMM(nn.Module):
         
     def forward(self, tokens):
         expert_scores, expert_indices = self.router(tokens)
-        group_token, _ = expert_input_permute(tokens, expert_indices, self.topk)
-        group_token = self.experts(group_token)
-        output = expert_output_permute(group_token, expert_indices, expert_scores, self.topk, tokens.shape)
+        grouped_tokens = expert_input_permute(tokens, expert_indices, self.topk)
+        grouped_tokens = self.experts(grouped_tokens)
+        output = expert_output_permute(grouped_tokens, expert_scores, self.topk, tokens.shape)
         return output
     
 class Expert(nn.Module):
@@ -118,7 +115,7 @@ class MoENaive(nn.Module):
 device = 'cuda'
 dtype = torch.float16
 
-num_tokens = 4
+num_tokens = 32
 tokens = torch.randn(num_tokens, 128).to(dtype).to(device)
 
 # apply 1 expert, identity weights, but with acitvation function.
@@ -130,15 +127,15 @@ print(output_group_gemm.mean())
 print(output_naive.mean())
 assert torch.allclose(output_group_gemm, output_naive)
 
-# apply 4 expert, top 2, identity weights.
-# set seeds so the routers are the same.
+# sets seeds so the routers are the same.
 # TODO: just pass the same router as argument into both modules
+num_experts = 4
 torch.manual_seed(0)
-moe = MoEGroupGEMM(4, 128, 128, 2).to(dtype).to(device)
+moe = MoEGroupGEMM(num_experts, 128, 128, 2).to(dtype).to(device)
 output_group_gemm = moe(tokens)
 
 torch.manual_seed(0)
-moe = MoENaive(4, 128, 128, 2).to(dtype).to(device)
+moe = MoENaive(num_experts, 128, 128, 2).to(dtype).to(device)
 output_naive = moe(tokens)
 
 print(output_group_gemm.mean())
