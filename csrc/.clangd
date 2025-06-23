@@ -10,6 +10,6 @@ CompileFlags:
     # Ideally, this could just be used in particular directories or files...
     -xcuda,
     --cuda-gpu-arch=sm_80,
-    # tell clangd where cutlass headers are
+    # tell clangd where cute and cutlass headers are
     -I/pub/afeeney/project/cutlass/include
   ]
