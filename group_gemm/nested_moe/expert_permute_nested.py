@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class GroupedTokens:
-    tokens: torch.NestedTensor
+    tokens: torch.nested._NestedTensor
     indices: torch.Tensor
     token_gather_indices: torch.Tensor
 
@@ -16,10 +16,10 @@ def get_token_indices(expert_indices, num_experts_per_token):
     indices = flat_expert_indices.argsort()
     token_indices = indices // num_experts_per_token
     # move to cpu, since only used to handle pointers
-    counts = flat_expert_indices.bincount().cpu().detach()
-    # torch.NestedTensor init offsets expects zero prefix
-    tokens_per_expert_range = torch.empty(counts.size(0) + 1)
-    tokens_per_expert_range = counts.cumsum(dim=0, out=tokens_per_expert_range[1:])
+    counts = flat_expert_indices.bincount()#.cpu().detach()
+    # torch.nested._NestedTensor init offsets expects zero prefix
+    tokens_per_expert_range = torch.empty(counts.size(0) + 1, device=expert_indices.device)
+    tokens_per_expert_range = torch.cumsum(counts, dim=0, out=tokens_per_expert_range[1:])
     tokens_per_expert_range[0] = 0
     return indices, tokens_per_expert_range, token_indices
 
@@ -27,11 +27,11 @@ def expert_input_permute(
     tokens: torch.Tensor, 
     expert_indices: torch.Tensor, 
     num_experts_per_token: int
-) -> torch.NestedTensor:
+) -> torch.nested._NestedTensor:
     indices, tokens_per_expert_range, token_indices = get_token_indices(expert_indices, num_experts_per_token)
     token_dim = tokens.size(1)
     output = torch.gather(tokens, dim=0, index=token_indices.unsqueeze(1).expand(-1, token_dim))
-    nt = torch.nested.nested_from_tensor_jagged(values=output, offsets=tokens_per_expert_range)
+    nt = torch.nested.nested_tensor_from_jagged(values=output, offsets=tokens_per_expert_range)
     return GroupedTokens(
         tokens=nt,
         indices=indices,

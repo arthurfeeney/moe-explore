@@ -1,27 +1,12 @@
 import torch
 from torch import nn
 from expert_permute import expert_input_permute, expert_output_permute
-from triton.group_gemm_triton import group_gemm_fn
+from triton_grouped_gemm.grouped_gemm import group_gemm_fn
 
 def make_identity_experts(num_experts, input_dim, output_dim):
     data = torch.zeros(num_experts, input_dim, output_dim)
     data[:, range(input_dim), range(output_dim)] = 1
     return data
-
-class MoERouter(nn.Module):
-    def __init__(self, num_experts, input_dim, topk):
-        super().__init__()
-        self.weights = nn.Linear(input_dim, num_experts, bias=False)
-        self.topk = topk
-
-    def identity_init(self):
-        with torch.no_grad():
-            self.weights.weight.copy_(torch.eye(*self.weights.weight.size()))
-        
-    def forward(self, tokens):
-        scores = self.weights(tokens).softmax(dim=-1)
-        topk_scores, topk_indices = torch.topk(scores, k=self.topk, dim=-1, sorted=False)
-        return topk_scores, topk_indices
     
 class ExpertsGroupGEMM(nn.Module):
     def __init__(self, num_experts, input_dim, hidden_dim, output_dim):
@@ -128,7 +113,7 @@ assert torch.allclose(output_group_gemm, output_naive)
 
 # sets seeds so the routers are the same.
 # TODO: just pass the same router as argument into both modules
-num_experts = 4
+num_experts = 8
 torch.manual_seed(0)
 moe = MoEGroupGEMM(num_experts, 128, 128, 2).to(dtype).to(device)
 output_group_gemm = moe(tokens)

@@ -1,7 +1,5 @@
 import torch
 from typing import List, Tuple
-import triton
-import triton.language as tl
 from dataclasses import dataclass
 
 @dataclass
