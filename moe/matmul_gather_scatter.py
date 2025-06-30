@@ -5,27 +5,26 @@ from typing import Optional
 
 @triton.jit
 def matmul_gather_scatter_kernel(
-    # a is a [t, K] tensor.
+    # a is a [t, K] tensor, always row-major since
+    # we want to gather/scatter rows.
     a_ptr,
     # b is [E, K, N]
+    # TODO: Should also setup so b can be transposed
     b_ptr,
-    # c is a [G, N] tensor (G = g1 + g2 + ...)
     c_ptr,
-    # The group indices essentially determime M sizes.
-    # [0, g1, g2, ..., gn]. So M_n = gn - g{n-1}
+    # The group indices essentially determime M size of each problem.
+    # [0, g1, g2, ..., gn]. So Mn = gn - g{n-1}
     group_indices_ptr,
     gather_indices_ptr,
     scatter_indices_ptr,
-    scale_ptr,
-    # b is [E, K, N],
-    # TODO: b could also be transposed...
+    scales_ptr,
     # E determines the number of problems.
     E: tl.constexpr,
-    # size of A before scatter
     K: tl.constexpr,
     N: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
+    SCALE_ROWS: tl.constexpr,
     NUM_PROGRAMS: tl.constexpr,
 ):
     tile_id = tl.program_id(axis=0)
@@ -48,18 +47,17 @@ def matmul_gather_scatter_kernel(
             tile_id_in_gemm = tile_id - last_problem_end
             tile_m_idx = (tile_id_in_gemm // num_n_tiles) * BLOCK_M
             tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
-
             tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
             tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
 
-            # mask based on group size, used to mask load of group indices and store to `c`
-            gather_indices_offsets = start_idx + tile_m_offsets
-            gather_mask = gather_indices_offsets < end_idx
+            gather_scatter_indices_offsets = start_idx + tile_m_offsets
+            # mask is based on group size, not number of rows 
+            gather_scatter_mask = gather_scatter_indices_offsets < end_idx
 
             if GATHER_ROWS:
-                a_row_indices = tl.load(gather_indices_ptr + gather_indices_offsets, mask=gather_mask)
+                a_row_indices = tl.load(gather_indices_ptr + gather_scatter_indices_offsets, mask=gather_scatter_mask)
             else:
-                a_row_indices = tile_m_offsets
+                a_row_indices = start_idx + tile_m_offsets
 
             a_ptrs = a_ptr + (a_row_indices * K)[:, None] + tl.arange(0, BLOCK_K)
 
@@ -70,53 +68,67 @@ def matmul_gather_scatter_kernel(
 
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
             for k in range(0, tl.cdiv(K, BLOCK_K)):
-                # we gather some garbage rows, so have to mask part of a
-                a_block = tl.load(a_ptrs, mask=gather_mask[:, None])
+                # Potentially gather some garbage rows, so zero-mask part of a
+                a_block = tl.load(a_ptrs, mask=gather_scatter_mask[:, None])
                 b_block = tl.load(b_ptrs)
                 acc = tl.dot(a_block, b_block, acc=acc) 
                 a_ptrs += BLOCK_K
                 b_ptrs += BLOCK_K * N
-
             acc = tl.cast(acc, tl.float16)
 
+            c_col_offsets = tile_n_offsets
             if SCATTER_ROWS:
-                pass
-            else:
-                if GATHER_ROWS:
-                    c_mask = gather_mask[:, None]
-                else:
-                    c_mask = None
-                c_row_offsets = start_idx + tile_m_offsets #tile_m_idx + tl.arange(0, BLOCK_M)[:, None]
-                c_col_offsets = tile_n_offsets #tile_n_idx + tl.arange(0, BLOCK_N)
+                if SCALE_ROWS:
+                    scales = tl.load(scales_ptr + gather_scatter_indices_offsets, mask=gather_scatter_mask)
+                    acc = acc * scales[:, None]
+                c_row_offsets = tl.load(scatter_indices_ptr + gather_scatter_indices_offsets, mask=gather_scatter_mask)
                 c_offsets = c_row_offsets[:, None] * N + c_col_offsets
                 c_ptrs = c_ptr + c_offsets
-                tl.store(c_ptrs, acc, mask=gather_mask[:, None])
+                # TODO: c needs to be initialized for this to work.
+                # Tricky to just zero initialize per-tile, because we write to scattered spots
+                tl.atomic_add(c_ptrs, acc, mask=gather_scatter_mask[:, None])
+            else:
+                # if we aren't scattering, just write output
+                c_row_offsets = start_idx + tile_m_offsets
+                c_offsets = c_row_offsets[:, None] * N + c_col_offsets
+                c_ptrs = c_ptr + c_offsets
+                tl.store(c_ptrs, acc, mask=gather_scatter_mask[:, None])
 
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
+
+def get_output_rows(a_rows, gather_indices, scatter_indices, output_rows):
+    if output_rows is not None:
+        return output_rows
+    if gather_indices is not None and scatter_indices is None:
+        return gather_indices.size(0)
+    if gather_indices is None and scatter_indices is not None:
+        # this is a kernel call, which can be avoided by passing in output_rows
+        return scatter_indics.max() + 1
+    # if we don't scatter or gather, then it's just a normal matmul,
+    # so size of output matches input
+    return a_rows
 
 def matmul_gather_scatter(
     a: torch.Tensor,
     b: torch.Tensor,
     group_indices: torch.Tensor,
-    gather_indices: Optional[torch.Tensor],
-    scatter_indices: Optional[torch.Tensor],
-    scale: Optional[torch.Tensor]
+    gather_indices: Optional[torch.Tensor] = None,
+    scatter_indices: Optional[torch.Tensor] = None,
+    scales: Optional[torch.Tensor] = None,
+    output_rows: Optional[int] = None
 ):
     assert a.dim() == 2
     assert b.dim() == 3
     assert a.size(1) == b.size(1)
+    assert group_indices is not None
     assert group_indices.dim() == 1
     assert gather_indices is None or gather_indices.dim() == 1
     assert scatter_indices is None or scatter_indices.dim() == 1
 
     e, k, n = b.size()
 
-    if scatter_indices is None and gather_indices is not None:
-        c_rows = gather_indices.size(0)
-    else:
-        c_rows = a.size(0) 
-
+    c_rows = get_output_rows(a.size(0), gather_indices, scatter_indices, output_rows)
     c = torch.zeros((c_rows, n), device=a.device, dtype=a.dtype)
     num_programs = 1
     matmul_gather_scatter_kernel[(num_programs,)](
@@ -126,12 +138,13 @@ def matmul_gather_scatter(
         group_indices, 
         gather_indices, 
         scatter_indices,
-        scale,
+        scales,
         E=e, 
         K=k, 
         N=n,
         GATHER_ROWS=gather_indices is not None,
         SCATTER_ROWS=scatter_indices is not None,
+        SCALE_ROWS=scales is not None,
         NUM_PROGRAMS=num_programs
     )
 
