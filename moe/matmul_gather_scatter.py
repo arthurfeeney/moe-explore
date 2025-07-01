@@ -18,7 +18,9 @@ def matmul_gather_scatter_kernel(
     group_indices_ptr,
     gather_indices_ptr,
     scatter_indices_ptr,
+    # Scales use a different set of indices
     scales_ptr,
+    scales_indices_ptr,
     # E determines the number of problems.
     E: tl.constexpr,
     K: tl.constexpr,
@@ -80,9 +82,14 @@ def matmul_gather_scatter_kernel(
             c_col_offsets = tile_n_offsets
             if SCATTER_ROWS:
                 if SCALE_ROWS:
-                    scales = tl.load(scales_ptr + gather_scatter_indices_offsets, mask=gather_scatter_mask)
+                    scales_indices = tl.load(scales_indices_ptr + gather_scatter_indices_offsets)
+                    scales = tl.load(scales_ptr + scales_indices,
+                                     mask=gather_scatter_mask, 
+                                     other=0.0)
                     acc = acc * scales[:, None]
-                c_row_offsets = tl.load(scatter_indices_ptr + gather_scatter_indices_offsets, mask=gather_scatter_mask)
+                c_row_offsets = tl.load(scatter_indices_ptr + gather_scatter_indices_offsets, 
+                                        mask=gather_scatter_mask, 
+                                        other=0)
                 c_offsets = c_row_offsets[:, None] * N + c_col_offsets
                 c_ptrs = c_ptr + c_offsets
                 # TODO: c needs to be initialized for this to work.
@@ -117,6 +124,7 @@ def matmul_gather_scatter(
     gather_indices: Optional[torch.Tensor] = None,
     scatter_indices: Optional[torch.Tensor] = None,
     scales: Optional[torch.Tensor] = None,
+    scales_indices: Optional[torch.Tensor] = None,
     output_rows: Optional[int] = None
 ):
     assert a.dim() == 2
@@ -140,6 +148,7 @@ def matmul_gather_scatter(
         gather_indices, 
         scatter_indices,
         scales,
+        scales_indices,
         E=e, 
         K=k, 
         N=n,
