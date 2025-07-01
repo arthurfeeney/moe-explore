@@ -18,9 +18,9 @@ def naive_matmul_gather_scatter(a, b, group_indices, gather_indices, scatter_ind
         prod = a_gather @ b[i]
         if scatter_indices is not None:
             if scales is not None:
-                prod *= scales[glo:ghi][:, None]
+                index = gather_indices[glo:ghi]
+                prod *= scales[index][:, None]
             index = scatter_indices[glo:ghi].unsqueeze(-1).expand(-1, prod.size(-1))
-            print(c.size(), index.size(), index.min(), index.max())
             c.scatter_reduce_(
                     0,
                     index, 
@@ -37,8 +37,10 @@ def cmp(a, b, group_indices, gather_indices, scatter_indices, scales, output_row
     assert out.dtype == a.dtype
     assert out.size() == ref.size()
 
-    if scatter_indices is not None:
+    if output_rows is None and scatter_indices is not None:
         assert out.size(0) == torch.unique(scatter_indices).size(0)
+
+    assert out.isfinite().all() and ref.isfinite().all()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 def test_matmul_gather_scatter_group_and_gather():
@@ -152,7 +154,7 @@ def test_matmul_gather_scatter_group_scatter_1():
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
     gather_indices = torch.arange(0, m, device="cuda")
     scatter_indices = torch.arange(0, m, device="cuda")
-    scales = 2 * torch.ones(m, device="cuda", dtype=torch.float16)
+    scales = torch.randn(m, device="cuda", dtype=torch.float16)
 
     cmp(a,
         b,
@@ -162,7 +164,7 @@ def test_matmul_gather_scatter_group_scatter_1():
         scales
     )
 
-def test_matmul_gather_scatter_all():
+def test_matmul_gather_all():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -173,19 +175,38 @@ def test_matmul_gather_scatter_all():
     g1 = torch.randint(low=1, high=gather_size - 2, size=(1,)).item()
     g2 = torch.randint(low=g1 + 1, high=gather_size - 1, size=(1,)).item()
     group_indices = torch.tensor([0, g1, g2, gather_size], device="cuda").to(torch.uint32)
+    gather_indices = torch.randint(0, m, size=(gather_size,), device="cuda")
+    cmp(a,
+        b,
+        group_indices,
+        gather_indices,
+        None,
+        None,
+        None 
+    )
 
-    print(group_indices)
+def test_matmul_gather_scatter_all():
+    e, m, k, n = 3, 512, 512, 512
+    a = torch.randn((m, k), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.002
+    
+    gather_size = 4 * m
+
+    # four groups with random sizes
+    g1 = torch.randint(low=1, high=gather_size - 2, size=(1,)).item()
+    g2 = torch.randint(low=g1 + 1, high=gather_size - 1, size=(1,)).item()
+    group_indices = torch.tensor([0, g1, g2, gather_size], device="cuda").to(torch.uint32)
 
     # random gather and scatter indices
     gather_indices = torch.randint(0, m, size=(gather_size,), device="cuda")
     scatter_indices = torch.randint(0, m, size=(gather_size,), device="cuda")
     scales = torch.randn(gather_size, device="cuda", dtype=torch.float16)
 
-    naive_matmul_gather_scatter(a,
+    cmp(a,
         b,
         group_indices,
         gather_indices,
         scatter_indices,
-        scales,
+        None,
         output_rows=m 
     )
