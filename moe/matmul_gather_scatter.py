@@ -33,6 +33,10 @@ def matmul_gather_scatter_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr
 ):
+    tl.static_assert(K % BLOCK_K == 0)
+    tl.static_assert(N % BLOCK_N == 0)
+
+
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
 
@@ -82,7 +86,9 @@ def matmul_gather_scatter_kernel(
             c_col_offsets = tile_n_offsets
             if SCATTER_ROWS:
                 if SCALE_ROWS:
-                    scales_indices = tl.load(scales_indices_ptr + gather_scatter_indices_offsets)
+                    scales_indices = tl.load(scales_indices_ptr + gather_scatter_indices_offsets, 
+                                             mask=gather_scatter_mask,
+                                             other=0)
                     scales = tl.load(scales_ptr + scales_indices,
                                      mask=gather_scatter_mask, 
                                      other=0.0)
