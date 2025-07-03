@@ -3,6 +3,7 @@ import torch
 from .router_impl.topk_router import topk_router
 from .expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from .matmul_gather_scatter import matmul_gather_scatter
+from .parallel_linear_impl.grouped_gemm_triton import group_gemm_fn
 
 def topk_moe_naive_forward(
     input,
