@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import List
-from ..expert_permute import GroupedTokens
+from moe_explore.expert_permute import GroupedTokens
 
 DEVICE = 'cuda'
 

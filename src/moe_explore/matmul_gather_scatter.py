@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from moe.gpu_utils import get_gpu_sm_count
+from moe_explore.gpu_utils import get_gpu_sm_count
 
 @triton.jit
 def matmul_gather_scatter_kernel(
@@ -35,7 +35,6 @@ def matmul_gather_scatter_kernel(
 ):
     tl.static_assert(K % BLOCK_K == 0)
     tl.static_assert(N % BLOCK_N == 0)
-
 
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -98,8 +97,10 @@ def matmul_gather_scatter_kernel(
                                         other=0)
                 c_offsets = c_row_offsets[:, None] * N + c_col_offsets
                 c_ptrs = c_ptr + c_offsets
-                # TODO: c needs to be initialized for this to work.
-                # Tricky to just zero initialize per-tile, because we write to scattered spots
+                # TODO: 
+                # 1. c needs to be initialized for this to work. Tricky to just zero 
+                #    initialize per-tile, because we write to scattered spots
+                # 2. How is scatter-reduce done in pytorch?
                 tl.atomic_add(c_ptrs, acc, mask=gather_scatter_mask[:, None])
             else:
                 # if we aren't scattering, just write output
@@ -145,7 +146,7 @@ def matmul_gather_scatter(
 
     c_rows = get_output_rows(a.size(0), gather_indices, scatter_indices, output_rows)
     c = torch.zeros((c_rows, n), device=a.device, dtype=a.dtype)
-    num_programs = 20
+    num_programs = get_gpu_sm_count(a.device)
     matmul_gather_scatter_kernel[(num_programs,)](
         a, 
         b, 
