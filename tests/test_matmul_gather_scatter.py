@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import torch
 
-from moe.matmul_gather_scatter import matmul_gather_scatter, get_output_rows
+from moe_explore.matmul_gather_scatter import matmul_gather_scatter, get_output_rows
 
 def naive_matmul_gather_scatter(
     a, 
