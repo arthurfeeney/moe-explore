@@ -1,7 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
 [project]
-name = "moe-explore"
+name = "moe_explore"
 version = "0.1.0"
-description = "Add your description here"
+description = "Playing around with some MoE Implementations"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "pytest",
+  "numpy",
+  "torch>=2.7.0",
+  "matplotlib>=3.10.3",
+  "pandas>=2.3.0",
+  "imgcat>=0.6.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+testpaths = [
+  "tests"
+]
