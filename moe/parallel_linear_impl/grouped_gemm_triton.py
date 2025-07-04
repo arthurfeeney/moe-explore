@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import List
-from expert_permute import GroupedTokens
+from ..expert_permute import GroupedTokens
 
 DEVICE = 'cuda'
 
@@ -191,11 +191,6 @@ def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
         group_size,
     )
     
-    print(group_A.tokens)
-    print(c)
-    
-    assert torch.allclose(group_A.tokens, c)
-        
     return GroupedTokens(
         tokens=c,
         tokens_per_expert_range=group_A.tokens_per_expert_range,

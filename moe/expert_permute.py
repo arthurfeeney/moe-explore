@@ -1,7 +1,5 @@
 import torch
 from typing import List, Tuple
-import triton
-import triton.language as tl
 from dataclasses import dataclass
 
 @dataclass
@@ -14,11 +12,20 @@ class GroupedTokens:
     token_gather_indices: torch.Tensor
 
 @torch.compile
-def get_token_indices(expert_indices, num_experts_per_token):
+def get_token_indices(expert_indices, num_experts_per_token, zero_prefix=False):
     flat_expert_indices = expert_indices.view(-1)
     indices = flat_expert_indices.argsort()
     counts = flat_expert_indices.bincount()
-    tokens_per_expert_range = counts.cumsum(dim=0)
+
+    if zero_prefix:
+        tokens_per_expert_range = torch.empty(counts.size(0) + 1, dtype=int, device=expert_indices.device)
+        tokens_per_expert_range[0] = 0
+        torch.cumsum(counts, dim=0, out=tokens_per_expert_range[1:])
+    else:
+        tokens_per_expert_range = counts.cumsum(dim=0)
+        #tokens_per_expert_range = torch.empty(counts.size(0) + 1)
+        #torch.cumsum(counts, dim=0, out=tokens_per_expert_range[1:])
+    #tokens_per_expert_range = counts.cumsum(dim=0)
     token_indices = indices // num_experts_per_token
     return indices, tokens_per_expert_range, token_indices
 
