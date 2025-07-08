@@ -5,10 +5,4 @@ class AutotuneMode(Enum):
     FAST = 1
     MAX = 2
 
-DEFAULT_AUTOTUNE_MODE = AutotuneMode.NONE
-
-def get_matmul_autotune_configs(autotune_mode: AutotuneMode):
-    if autotune_mode == AutotuneMode.NONE:
-        return []
-    if autotune_mode == AutotuneMode.FAST:
-        return []
+DEFAULT_AUTOTUNE_MODE = AutotuneMode.FAST

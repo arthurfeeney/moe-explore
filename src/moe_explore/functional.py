@@ -4,7 +4,7 @@ from torch.profiler import record_function
 from moe_explore.router_impl.topk_router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.matmul_gather_scatter import matmul_gather_scatter
-from moe_explore.parallel_linear_impl.grouped_gemm_triton import group_gemm_fn
+from moe_explore.group_gemm import group_gemm_fn
 
 def topk_moe_naive_forward(
     input,

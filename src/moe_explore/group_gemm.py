@@ -1,47 +1,48 @@
+import itertools
 import torch
 import triton
 import triton.language as tl
 from typing import List
+from moe_explore.autotune_config import AutotuneMode, DEFAULT_AUTOTUNE_MODE
 from moe_explore.expert_permute import GroupedTokens
+from moe_explore.gpu_utils import get_gpu_sm_count
 
-DEVICE = 'cuda'
-
-def is_cuda():
-    return triton.runtime.driver.active.get_current_target().backend == "cuda"
-
-def num_sms():
-    if is_cuda():
-        return torch.cuda.get_device_properties("cuda").multi_processor_count
-    return 148
-
-configs = [
-    # M, N, K, warps, stages
-    (128, 128, 128, 4, 4),
-    (128, 128, 64, 4, 4),
-    (128, 128, 32, 4, 4),
-    (256, 256, 64, 4, 4),
-    (64, 128, 128, 4, 4),
-    (128, 128, 128, 8, 4),
-    (256, 256, 64, 8, 4),
-    (64, 64, 128, 4, 4),
-    (64, 64, 256, 4, 4),
-    (128, 64, 256, 4, 4)
-]
-
-configs = [
-    triton.Config({
-        'BLOCK_SIZE_M': c[0],
-        'BLOCK_SIZE_N': c[1],
-        'BLOCK_SIZE_K': c[2],
-        'num_warps': c[3],
-        'num_stages': c[4],
-        'NUM_SM': num_sms()
-    }) for c in configs
-]
-
+def _autotune_configs(autotune_mode: AutotuneMode):
+    assert autotune_mode is not None
+    assert isinstance(autotune_mode, AutotuneMode)
+    if autotune_mode == AutotuneMode.NONE:
+        return [
+            triton.Config({
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 64,
+            })
+        ]
+    if autotune_mode == AutotuneMode.FAST:
+        configs = []
+        block_sizes = [64, 128]
+        num_warps = [4]
+        num_stages = [3, 4]
+        for block_m, block_n, block_k, num_warps, num_stages in itertools.product(
+                block_sizes, 
+                block_sizes, 
+                block_sizes,
+                num_warps,
+                num_stages
+        ):
+            configs.append(triton.Config({
+                'BLOCK_M': block_m,
+                'BLOCK_N': block_n,
+                'BLOCK_K': block_k,
+                'num_warps': num_warps,
+                'num_stages': num_stages
+            }))
+        return configs
+    elif autotune_mode == AutotuneMode.MAX:
+        return None
 
 @triton.autotune(
-    configs=configs,
+    configs=_autotune_configs(DEFAULT_AUTOTUNE_MODE),
     key=['group_size'],
 )
 @triton.jit
@@ -59,11 +60,11 @@ def grouped_matmul_kernel(
     # number of gemms
     group_size,
     # number of virtual SM
-    NUM_SM: tl.constexpr,
+    NUM_PROGRAMS: tl.constexpr,
     # tile sizes
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     tile_idx = tl.program_id(0)
     last_problem_end = 0
@@ -72,8 +73,8 @@ def grouped_matmul_kernel(
         gm = tl.load(group_gemm_sizes + g * 3)
         gn = tl.load(group_gemm_sizes + g * 3 + 1)
         gk = tl.load(group_gemm_sizes + g * 3 + 2)
-        num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
-        num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
+        num_m_tiles = tl.cdiv(gm, BLOCK_M)
+        num_n_tiles = tl.cdiv(gn, BLOCK_N)
         num_tiles = num_m_tiles * num_n_tiles
         # iterate through the tiles in the current gemm problem
         while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
@@ -91,38 +92,38 @@ def grouped_matmul_kernel(
             tile_n_idx = tile_idx_in_gemm % num_n_tiles
 
             # do regular gemm here
-            offs_am = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_bn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            offs_k = tl.arange(0, BLOCK_SIZE_K)
+            offs_am = tile_m_idx * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_bn = tile_n_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_k = tl.arange(0, BLOCK_K)
             a_ptrs = a_ptr + offs_am[:, None] * lda + offs_k[None, :]
             b_ptrs = b_ptr + offs_k[:, None] * ldb + offs_bn[None, :]
             
             m_mask = offs_am < gm
             n_mask = offs_bn < gn
             
-            accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-            for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
+            accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            for kk in range(0, tl.cdiv(k, BLOCK_K)):
                 # hint to Triton compiler to do proper loop pipelining
                 tl.multiple_of(a_ptrs, [16, 16])
                 tl.multiple_of(b_ptrs, [16, 16])
             
-                k_mask = kk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K) < k
+                k_mask = kk * BLOCK_K + tl.arange(0, BLOCK_K) < k
                                 
                 a = tl.load(a_ptrs, mask=m_mask[:, None] and k_mask)
                 b = tl.load(b_ptrs, mask=k_mask[:, None] and n_mask)
                 accumulator += tl.dot(a, b)
-                a_ptrs += BLOCK_SIZE_K
-                b_ptrs += BLOCK_SIZE_K * ldb
+                a_ptrs += BLOCK_K
+                b_ptrs += BLOCK_K * ldb
             c = accumulator.to(tl.float16)
 
-            offs_cm = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            offs_cn = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            offs_cm = tile_m_idx * BLOCK_M + tl.arange(0, BLOCK_M)
+            offs_cn = tile_n_idx * BLOCK_N + tl.arange(0, BLOCK_N)
             c_ptrs = c_ptr + ldc * offs_cm[:, None] + offs_cn[None, :]
 
             tl.store(c_ptrs, c, mask=m_mask[:, None] and n_mask)
 
-            # go to the next tile by advancing NUM_SM
-            tile_idx += NUM_SM
+            # go to the next tile by advancing NUM_PROGRAMS
+            tile_idx += NUM_PROGRAMS
 
         # get ready to go to the next gemm problem
         last_problem_end = last_problem_end + num_tiles
@@ -161,7 +162,7 @@ def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
     
     assert (sum([s[0] for s in A_shapes]) == group_A.tokens.size(0))
     
-    c = torch.ones((group_A.tokens.size(0), group_B.size(-1)), device=DEVICE, dtype=group_A.tokens.dtype)
+    c = torch.ones((group_A.tokens.size(0), group_B.size(-1)), device="cuda", dtype=group_A.tokens.dtype)
     
     c_offset = 0
     for i in range(group_size):
@@ -175,13 +176,13 @@ def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
         c_offset += M
                 
     # note these are device tensors
-    d_a_ptrs = torch.tensor(A_addrs, device=DEVICE)
-    d_b_ptrs = torch.tensor(B_addrs, device=DEVICE)
-    d_c_ptrs = torch.tensor(C_addrs, device=DEVICE)
-    d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=DEVICE)
-    d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=DEVICE)
+    d_a_ptrs = torch.tensor(A_addrs, device="cuda")
+    d_b_ptrs = torch.tensor(B_addrs, device="cuda")
+    d_c_ptrs = torch.tensor(C_addrs, device="cuda")
+    d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device="cuda")
+    d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device="cuda")
     # we use a fixed number of CTA, and it's auto-tunable
-    grid = lambda META: (META['NUM_SM'], )
+    grid = lambda META: (META['NUM_PROGRAMS'], )
     grouped_matmul_kernel[grid](
         d_a_ptrs,
         d_b_ptrs,
@@ -189,6 +190,7 @@ def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
         d_g_sizes,
         d_g_lds,
         group_size,
+        NUM_PROGRAMS=get_gpu_sm_count(c.device)
     )
     
     return GroupedTokens(

@@ -1,3 +1,4 @@
+import itertools
 import torch
 import triton
 import triton.language as tl
@@ -14,30 +15,34 @@ def _autotune_configs(autotune_mode: AutotuneMode):
                 "BLOCK_M": 64,
                 "BLOCK_N": 64,
                 "BLOCK_K": 64
-            }),
-            triton.Config({
-                "BLOCK_M": 64,
-                "BLOCK_N": 64,
-                "BLOCK_K": 64
             })
         ]
     if autotune_mode == AutotuneMode.FAST:
         configs = []
-        for block_m in [64, 128]:
-            for block_n in [64, 128]:
-                for block_k in [64, 128]:
-                    configs.append(triton.Config({
-                        'BLOCK_M': block_m,
-                        'BLOCK_N': block_n,
-                        'BLOCK_K': block_k
-                    }))
+        block_sizes = [64, 128]
+        num_warps = [4]
+        num_stages = [3, 4]
+        for block_m, block_n, block_k, num_warps, num_stages in itertools.product(
+            block_sizes, 
+            block_sizes, 
+            block_sizes,
+            num_warps,
+            num_stages
+        ):
+            configs.append(triton.Config({
+                'BLOCK_M': block_m,
+                'BLOCK_N': block_n,
+                'BLOCK_K': block_k,
+                'num_warps': num_warps,
+                'num_stages': num_stages
+            }))
         return configs
     elif autotune_mode == AutotuneMode.MAX:
         return None
                     
 
 @triton.autotune(
-    configs=_autotune_configs(AutotuneMode.NONE),
+    configs=_autotune_configs(DEFAULT_AUTOTUNE_MODE),
     # cannot really do autotuning on the group sizes...
     key=['E', 'N', 'K'],
     reset_to_zero=['c_ptr']
