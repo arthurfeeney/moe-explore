@@ -154,7 +154,7 @@ def test_matmul_gather_scatter_group_scatter_1():
         scales_indices
     )
 
-def test_matmul_gather_scatter_group_scatter_1():
+def test_matmul_gather_scatter_group_scatter_2():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)

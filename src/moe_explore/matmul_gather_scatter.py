@@ -3,7 +3,45 @@ import triton
 import triton.language as tl
 from typing import Optional
 from moe_explore.gpu_utils import get_gpu_sm_count
+from moe_explore.autotune_config import AutotuneMode, DEFAULT_AUTOTUNE_MODE
 
+def _autotune_configs(autotune_mode: AutotuneMode):
+    assert autotune_mode is not None
+    assert isinstance(autotune_mode, AutotuneMode)
+    if autotune_mode == AutotuneMode.NONE:
+        return [
+            triton.Config({
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 64
+            }),
+            triton.Config({
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "BLOCK_K": 64
+            })
+        ]
+    if autotune_mode == AutotuneMode.FAST:
+        configs = []
+        for block_m in [64, 128]:
+            for block_n in [64, 128]:
+                for block_k in [64, 128]:
+                    configs.append(triton.Config({
+                        'BLOCK_M': block_m,
+                        'BLOCK_N': block_n,
+                        'BLOCK_K': block_k
+                    }))
+        return configs
+    elif autotune_mode == AutotuneMode.MAX:
+        return None
+                    
+
+@triton.autotune(
+    configs=_autotune_configs(AutotuneMode.NONE),
+    # cannot really do autotuning on the group sizes...
+    key=['E', 'N', 'K'],
+    reset_to_zero=['c_ptr']
+)
 @triton.jit
 def matmul_gather_scatter_kernel(
     # a is a [t, K] tensor, always row-major since
@@ -163,9 +201,6 @@ def matmul_gather_scatter(
         SCATTER_ROWS=scatter_indices is not None,
         SCALE_ROWS=scales is not None,
         NUM_PROGRAMS=num_programs,
-        BLOCK_M=32,
-        BLOCK_N=32,
-        BLOCK_K=32
     )
 
     return c
