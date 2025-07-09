@@ -25,7 +25,6 @@ def topk_moe_naive_forward(
         flat_expert_indices = topk_indices.view(-1)
         flat_expert_weights = topk_scores.view(-1, 1)
 
-        topk_scores, topk_indices = topk_router(input, router_weight, topk)
         idxs, tokens_per_expert, token_idxs = get_token_indices(topk_indices, topk)
 
     with record_function("moe"):
