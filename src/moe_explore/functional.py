@@ -3,8 +3,8 @@ from torch.profiler import record_function
 
 from moe_explore.router_impl.topk_router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
-from moe_explore.matmul_gather_scatter import matmul_gather_scatter
-from moe_explore.group_gemm import group_gemm_fn
+from moe_explore.triton_kernels.matmul_gather_scatter import matmul_gather_scatter
+from moe_explore.triton_kernels.group_gemm import group_gemm_fn
 
 def topk_moe_naive_forward(
     input,
@@ -51,6 +51,8 @@ def topk_moe_naive_forward(
             )
     return expert_cache
 
+def topk_moe_naive_backward():
+    pass
 
 def topk_moe_matmul_gather_scatter_forward(
     input: torch.Tensor,
