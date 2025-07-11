@@ -1,7 +1,7 @@
 import math
 import torch
 from triton.testing import perf_report, do_bench, Benchmark
-from moe_explore.functional import (
+from moe_explore.functional.forward import (
     topk_moe_naive_forward,
     topk_moe_matmul_gather_scatter_forward,
     topk_moe_group_gemm_forward
@@ -42,7 +42,7 @@ def moe_benchmark(plot_name, num_experts, seq_len, hidden_dim, input_dim, activa
 configs = []
 configs.append(
         moe_benchmark(
-            "Small Input MoE Forward",
+            "Small Input, 64 Experts Forward",
             num_experts=64,
             seq_len=2048,
             hidden_dim=256,
@@ -51,7 +51,7 @@ configs.append(
         ))
 configs.append(
         moe_benchmark(
-            "Large Input MoE Forward",
+            "Large Input, 64 Experts Forward",
             num_experts=64,
             seq_len=16 * 2048,
             hidden_dim=512,

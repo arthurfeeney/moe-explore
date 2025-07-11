@@ -1,7 +1,7 @@
 import pytest
 import torch
 import math
-from moe_explore.functional import (
+from moe_explore.functional.forward import (
     topk_moe_naive_forward, 
     topk_moe_group_gemm_forward,
     topk_moe_matmul_gather_scatter_forward

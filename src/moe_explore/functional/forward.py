@@ -50,9 +50,6 @@ def topk_moe_naive_forward(
             )
     return expert_cache
 
-def topk_moe_naive_backward():
-    pass
-
 def topk_moe_matmul_gather_scatter_forward(
     input: torch.Tensor,
     router_weight: torch.Tensor,
