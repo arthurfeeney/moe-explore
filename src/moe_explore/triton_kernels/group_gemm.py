@@ -2,49 +2,11 @@ import itertools
 import torch
 import triton
 import triton.language as tl
-from typing import List
-from moe_explore.autotune_config import AutotuneMode, DEFAULT_AUTOTUNE_MODE
+from typing import List, Optional
+from moe_explore.autotune_config import AutotuneMode, fast_autotune_configs, max_autotune_configs
 from moe_explore.expert_permute import GroupedTokens
 from moe_explore.gpu_utils import get_gpu_sm_count
 
-def _autotune_configs(autotune_mode: AutotuneMode):
-    assert autotune_mode is not None
-    assert isinstance(autotune_mode, AutotuneMode)
-    if autotune_mode == AutotuneMode.NONE:
-        return [
-            triton.Config({
-                "BLOCK_M": 64,
-                "BLOCK_N": 64,
-                "BLOCK_K": 64,
-            })
-        ]
-    if autotune_mode == AutotuneMode.FAST:
-        configs = []
-        block_sizes = [64, 128]
-        num_warps = [4]
-        num_stages = [3, 4]
-        for block_m, block_n, block_k, num_warps, num_stages in itertools.product(
-                block_sizes, 
-                block_sizes, 
-                block_sizes,
-                num_warps,
-                num_stages
-        ):
-            configs.append(triton.Config({
-                'BLOCK_M': block_m,
-                'BLOCK_N': block_n,
-                'BLOCK_K': block_k,
-                'num_warps': num_warps,
-                'num_stages': num_stages
-            }))
-        return configs
-    elif autotune_mode == AutotuneMode.MAX:
-        return None
-
-@triton.autotune(
-    configs=_autotune_configs(DEFAULT_AUTOTUNE_MODE),
-    key=['group_size'],
-)
 @triton.jit
 def grouped_matmul_kernel(
     # device tensor of matrices pointers
@@ -150,7 +112,23 @@ def get_b_addrs(group_B: torch.Tensor, group_size: int):
         b_shapes.append((K, N))
     return b_addrs, b_shapes
 
-def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
+_fast_autotune_grouped_matmul_kernel = triton.autotune(
+    configs=fast_autotune_configs(persistent=True),
+    key=["group_size"],
+)(grouped_matmul_kernel)
+
+_max_autotune_grouped_matmul_kernel = triton.autotune(
+    configs=max_autotune_configs(persistent=True),
+    key=["group_size"],
+)(grouped_matmul_kernel)
+
+def group_gemm_fn(
+    group_A: GroupedTokens, 
+    group_B: torch.Tensor,
+    autotune_mode: Optional[AutotuneMode] = None
+):
+    assert autotune_mode is None or autotune_mode in AutotuneMode
+
     group_size = group_B.size(0)
     
     A_addrs, A_shapes = get_a_addrs(group_A, group_size)
@@ -181,16 +159,26 @@ def group_gemm_fn(group_A: GroupedTokens, group_B: torch.Tensor):
     d_c_ptrs = torch.tensor(C_addrs, device="cuda")
     d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device="cuda")
     d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device="cuda")
+
+    default_kwargs = {}
+    if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
+        default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_PROGRAMS": get_gpu_sm_count()}
+        func = grouped_matmul_kernel
+    elif autotune_mode == AutotuneMode.FAST:
+        func = _fast_autotune_grouped_matmul_kernel
+    elif autotune_mode == AutotuneMode.MAX:
+        func = _max_autotune_grouped_matmul_kernel
+
     # we use a fixed number of CTA, and it's auto-tunable
     grid = lambda META: (META['NUM_PROGRAMS'], )
-    grouped_matmul_kernel[grid](
+    func[grid](
         d_a_ptrs,
         d_b_ptrs,
         d_c_ptrs,
         d_g_sizes,
         d_g_lds,
         group_size,
-        NUM_PROGRAMS=get_gpu_sm_count(c.device)
+        **default_kwargs
     )
     
     return GroupedTokens(
