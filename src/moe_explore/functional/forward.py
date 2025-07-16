@@ -4,7 +4,7 @@ from torch.profiler import record_function
 from moe_explore.router_impl.topk_router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.triton_kernels.grouped_mm_gather_scatter import grouped_mm_gather_scatter
-from moe_explore.triton_kernels.grouped_mm import group_gemm_fn
+#from moe_explore.triton_kernels.grouped_mm import group_gemm_fn
 
 def topk_moe_naive_forward(
     input,
@@ -92,9 +92,9 @@ def topk_moe_group_gemm_forward(
     with record_function("input_permute"):
         group_token = expert_input_permute(input, topk_indices, topk)
     with record_function("moe"):
-        group_token = group_gemm_fn(group_token, expert_weights1)
+        group_token.tokens = grouped_mm_gather_scatter(group_token.tokens, expert_weights1, group_token.group_indices)
         group_token.tokens = activation(group_token.tokens)
-        group_token = group_gemm_fn(group_token, expert_weights2)
+        group_token.tokens = grouped_mm_gather_scatter(group_token.tokens, expert_weights2, group_token.group_indices)
     with record_function("output_permute"):
         output = expert_output_permute(group_token, topk_scores, input.size())
     return output
