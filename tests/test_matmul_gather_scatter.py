@@ -1,9 +1,9 @@
-from dataclasses import dataclass
 import torch
-
-from moe_explore.triton_kernels.matmul_gather_scatter import matmul_gather_scatter, get_output_rows
-
-def naive_matmul_gather_scatter(
+from moe_explore.triton_kernels.grouped_mm_gather_scatter import (
+        grouped_mm_gather_scatter, 
+        get_output_rows
+)
+def naive_grouped_mm_gather_scatter(
     a, 
     b,
     group_indices, 
@@ -48,9 +48,9 @@ def cmp(
     scales_indices=None,
     output_rows=None
 ):
-    out = matmul_gather_scatter(
+    out = grouped_mm_gather_scatter(
         a, b, group_indices, gather_indices, scatter_indices, scales, scales_indices, output_rows)
-    ref = naive_matmul_gather_scatter(
+    ref = naive_grouped_mm_gather_scatter(
         a, b, group_indices, gather_indices, scatter_indices, scales, scales_indices, output_rows)
 
     assert out.dtype == a.dtype
@@ -69,18 +69,18 @@ def test_autotune():
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
     gather_indices = torch.arange(0, m, device="cuda")
 
-    c = matmul_gather_scatter(
+    c = grouped_mm_gather_scatter(
         a, b, group_indices, gather_indices, autotune_mode="none"
     )
     assert c.isfinite().all()
-    c = matmul_gather_scatter(
+    c = grouped_mm_gather_scatter(
         a, b, group_indices, gather_indices, autotune_mode="fast"
     )
     assert c.isfinite().all()
     
 
 
-def test_matmul_gather_scatter_group_and_gather():
+def test_grouped_mm_gather_scatter_group_and_gather():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -95,7 +95,7 @@ def test_matmul_gather_scatter_group_and_gather():
         gather_indices
     )
 
-def test_matmul_gather_scatter_group():
+def test_grouped_mm_gather_scatter_group():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -107,7 +107,7 @@ def test_matmul_gather_scatter_group():
         group_indices,
     )
 
-def test_matmul_gather_scatter_group_sizes():
+def test_grouped_mm_gather_scatter_group_sizes():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -119,7 +119,7 @@ def test_matmul_gather_scatter_group_sizes():
         group_indices,
     )
     
-def test_matmul_gather_scatter_group_and_gather_2():
+def test_grouped_mm_gather_scatter_group_and_gather_2():
     e, m, k, n = 8, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -133,7 +133,7 @@ def test_matmul_gather_scatter_group_and_gather_2():
         gather_indices,
     )
 
-def test_matmul_gather_scatter_group_and_gather_reverse():
+def test_grouped_mm_gather_scatter_group_and_gather_reverse():
     def reverse_rows(x):
         return torch.flip(x, dims=[0])
 
@@ -151,7 +151,7 @@ def test_matmul_gather_scatter_group_and_gather_reverse():
         gather_indices,
     )
 
-def test_matmul_gather_scatter_group_scatter_1():
+def test_grouped_mm_gather_scatter_group_scatter_1():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -171,7 +171,7 @@ def test_matmul_gather_scatter_group_scatter_1():
         scales_indices
     )
 
-def test_matmul_gather_scatter_group_scatter_2():
+def test_grouped_mm_gather_scatter_group_scatter_2():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
@@ -192,7 +192,7 @@ def test_matmul_gather_scatter_group_scatter_2():
         scales_indices
     )
 
-def test_matmul_gather_all():
+def test_grouped_mm_gather_all():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.002
@@ -210,7 +210,7 @@ def test_matmul_gather_all():
         gather_indices,
     )
 
-def test_matmul_gather_scatter_all():
+def test_grouped_mm_gather_scatter_all():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.02
@@ -234,7 +234,7 @@ def test_matmul_gather_scatter_all():
         output_rows=m 
     )
 
-def test_matmul_gather_scatter_scale():
+def test_grouped_mm_gather_scatter_scale():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
     b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.02

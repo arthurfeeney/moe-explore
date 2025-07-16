@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple
+from typing import Union, Tuple
 from dataclasses import dataclass
 
 @dataclass
@@ -23,9 +23,6 @@ def get_token_indices(expert_indices, num_experts_per_token, zero_prefix=False):
         torch.cumsum(counts, dim=0, out=tokens_per_expert_range[1:])
     else:
         tokens_per_expert_range = counts.cumsum(dim=0)
-        #tokens_per_expert_range = torch.empty(counts.size(0) + 1)
-        #torch.cumsum(counts, dim=0, out=tokens_per_expert_range[1:])
-    #tokens_per_expert_range = counts.cumsum(dim=0)
     token_indices = indices // num_experts_per_token
     return indices, tokens_per_expert_range, token_indices
 
@@ -48,7 +45,7 @@ def expert_input_permute(
 def expert_output_permute(
     grouped_tokens: GroupedTokens,
     expert_scores: torch.Tensor,
-    output_shape: Tuple[int]
+    output_shape: Union[Tuple[int], torch.Size]
 ) -> torch.Tensor:
     grouped_tokens.tokens.mul_(expert_scores.view(-1, 1)[grouped_tokens.indices])
     output = torch.zeros(output_shape, dtype=grouped_tokens.tokens.dtype, device=grouped_tokens.tokens.device)

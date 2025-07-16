@@ -1,4 +1,3 @@
-import itertools
 import torch
 import triton
 import triton.language as tl
@@ -7,7 +6,7 @@ from moe_explore.gpu_utils import get_gpu_sm_count
 from moe_explore.autotune_config import AutotuneMode, fast_autotune_configs, max_autotune_configs
 
 @triton.jit
-def matmul_gather_scatter_kernel(
+def grouped_mm_gather_scatter_kernel(
     # a is a [t, K] tensor, always row-major since
     # we want to gather/scatter rows.
     a_ptr,
@@ -115,17 +114,17 @@ def matmul_gather_scatter_kernel(
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
 
-_fast_autotune_matmul_gather_scatter_kernel = triton.autotune(
+_fast_autotune_grouped_mm_gather_scatter_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
     key=['E', 'N', 'K'],
     reset_to_zero=['c_ptr']
-)(matmul_gather_scatter_kernel)
+)(grouped_mm_gather_scatter_kernel)
 
-_max_autotune_matmul_gather_scatter_kernel = triton.autotune(
+_max_autotune_grouped_mm_gather_scatter_kernel = triton.autotune(
     configs=max_autotune_configs(persistent=True),
     key=['E', 'N', 'K'],
     reset_to_zero=['c_ptr']
-)(matmul_gather_scatter_kernel)
+)(grouped_mm_gather_scatter_kernel)
 
 def get_output_rows(a_rows, gather_indices, scatter_indices, output_rows):
     if output_rows is not None:
@@ -135,11 +134,11 @@ def get_output_rows(a_rows, gather_indices, scatter_indices, output_rows):
     if gather_indices is None and scatter_indices is not None:
         # this is a kernel call, which can be avoided by passing in output_rows
         return scatter_indices.max() + 1
-    # if we don't scatter or gather, then it's just a normal matmul,
+    # if we don't scatter or gather, then it's just a normal grouped_mm,
     # so size of output matches input
     return a_rows
 
-def matmul_gather_scatter(
+def grouped_mm_gather_scatter(
     a: torch.Tensor,
     b: torch.Tensor,
     group_indices: torch.Tensor,
@@ -164,11 +163,11 @@ def matmul_gather_scatter(
     default_kwargs = {}
     if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
         default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_PROGRAMS": get_gpu_sm_count()}
-        func = matmul_gather_scatter_kernel
+        func = grouped_mm_gather_scatter_kernel
     elif autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_matmul_gather_scatter_kernel
+        func = _fast_autotune_grouped_mm_gather_scatter_kernel
     elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_matmul_gather_scatter_kernel
+        func = _max_autotune_grouped_mm_gather_scatter_kernel
 
     c_rows = get_output_rows(a.size(0), gather_indices, scatter_indices, output_rows)
     c = torch.zeros((c_rows, n), device=a.device, dtype=a.dtype)

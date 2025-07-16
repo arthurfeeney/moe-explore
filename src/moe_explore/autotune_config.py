@@ -27,7 +27,6 @@ def generate_configs(params: List[AutotuneParam]):
     return configs
 
 def fast_autotune_configs(persistent: bool):
-    print("getting config")
     block_sizes = [64, 128]
     block_m = AutotuneParam("BLOCK_M", block_sizes)
     block_n = AutotuneParam("BLOCK_N", block_sizes)
