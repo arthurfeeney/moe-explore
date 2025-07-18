@@ -3,8 +3,8 @@ from torch.profiler import record_function
 
 from moe_explore.router_impl.topk_router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
-from moe_explore.matmul_gather_scatter import matmul_gather_scatter
-from moe_explore.parallel_linear_impl.grouped_gemm_triton import group_gemm_fn
+from moe_explore.triton_kernels.grouped_mm_gather_scatter import grouped_mm_gather_scatter
+#from moe_explore.triton_kernels.grouped_mm import group_gemm_fn
 
 def topk_moe_naive_forward(
     input,
@@ -18,14 +18,7 @@ def topk_moe_naive_forward(
 ):
     with record_function("router"):
         topk_scores, topk_indices = topk_router(input, router_weight, topk)
-
-        _, hidden_dim = input.shape
-        orig_shape = input.shape
-        x_flat = input.view(-1, hidden_dim)
-        flat_expert_indices = topk_indices.view(-1)
         flat_expert_weights = topk_scores.view(-1, 1)
-
-        topk_scores, topk_indices = topk_router(input, router_weight, topk)
         idxs, tokens_per_expert, token_idxs = get_token_indices(topk_indices, topk)
 
     with record_function("moe"):
@@ -51,7 +44,6 @@ def topk_moe_naive_forward(
             )
     return expert_cache
 
-
 def topk_moe_matmul_gather_scatter_forward(
     input: torch.Tensor,
     router_weight: torch.Tensor,
@@ -66,14 +58,14 @@ def topk_moe_matmul_gather_scatter_forward(
         topk_scores, topk_indices = topk_router(input, router_weight, topk)
         indices, group_indices, gather_scatter_indices = get_token_indices(topk_indices, topk, zero_prefix=True)
     with record_function("moe"):
-        h = matmul_gather_scatter(
+        h = grouped_mm_gather_scatter(
             input, 
             expert_weights1, 
             group_indices,
             gather_indices=gather_scatter_indices,
         )
         h = activation(h)
-        h = matmul_gather_scatter(
+        h = grouped_mm_gather_scatter(
             h,
             expert_weights2,
             group_indices=group_indices,
@@ -81,10 +73,10 @@ def topk_moe_matmul_gather_scatter_forward(
             scatter_indices=gather_scatter_indices,
             scales=topk_scores.view(-1),
             scales_indices=indices.view(-1),
+            topk=topk,
             output_rows=input.size(0)
         )
     return h
-
 
 def topk_moe_group_gemm_forward(
     input: torch.Tensor,
@@ -101,9 +93,9 @@ def topk_moe_group_gemm_forward(
     with record_function("input_permute"):
         group_token = expert_input_permute(input, topk_indices, topk)
     with record_function("moe"):
-        group_token = group_gemm_fn(group_token, expert_weights1)
+        group_token.tokens = grouped_mm_gather_scatter(group_token.tokens, expert_weights1, group_token.group_indices)
         group_token.tokens = activation(group_token.tokens)
-        group_token = group_gemm_fn(group_token, expert_weights2)
+        group_token.tokens = grouped_mm_gather_scatter(group_token.tokens, expert_weights2, group_token.group_indices)
     with record_function("output_permute"):
         output = expert_output_permute(group_token, topk_scores, input.size())
     return output

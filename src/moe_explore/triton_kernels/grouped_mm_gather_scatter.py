@@ -3,9 +3,14 @@ import triton
 import triton.language as tl
 from typing import Optional
 from moe_explore.gpu_utils import get_gpu_sm_count
+from .autotune_config import (
+    AutotuneMode, 
+    fast_autotune_configs, 
+    max_autotune_configs
+)
 
 @triton.jit
-def matmul_gather_scatter_kernel(
+def grouped_mm_gather_scatter_kernel(
     # a is a [t, K] tensor, always row-major since
     # we want to gather/scatter rows.
     a_ptr,
@@ -21,10 +26,12 @@ def matmul_gather_scatter_kernel(
     # Scales use a different set of indices
     scales_ptr,
     scales_indices_ptr,
+    ACC_DTYPE: tl.constexpr,
     # E determines the number of problems.
     E: tl.constexpr,
     K: tl.constexpr,
     N: tl.constexpr,
+    TOPK: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
     SCALE_ROWS: tl.constexpr,
@@ -72,7 +79,7 @@ def matmul_gather_scatter_kernel(
             b_col_offsets = tile_n_offsets 
             b_ptrs = b_ptr + b_problem_offset + b_row_offsets + b_col_offsets 
 
-            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
             for k in range(0, tl.cdiv(K, BLOCK_K)):
                 # Potentially gather some garbage rows, so zero-mask some rows of a
                 a_block = tl.load(a_ptrs, mask=gather_scatter_mask[:, None], other=0.0)
@@ -80,6 +87,8 @@ def matmul_gather_scatter_kernel(
                 acc = tl.dot(a_block, b_block, acc=acc) 
                 a_ptrs += BLOCK_K
                 b_ptrs += BLOCK_K * N
+ 
+            # TODO: cast before or after scaling?
             acc = tl.cast(acc, tl.float16)
 
             c_col_offsets = tile_n_offsets
@@ -101,6 +110,7 @@ def matmul_gather_scatter_kernel(
                 # 1. c needs to be initialized for this to work. Tricky to just zero 
                 #    initialize per-tile, because we write to scattered spots
                 # 2. How is scatter-reduce done in pytorch?
+                # 3. There are a lot of stalls here. Mostly scoreboard, some from memory barrier
                 tl.atomic_add(c_ptrs, acc, mask=gather_scatter_mask[:, None])
             else:
                 # if we aren't scattering, just write output
@@ -112,6 +122,18 @@ def matmul_gather_scatter_kernel(
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
 
+_fast_autotune_grouped_mm_gather_scatter_kernel = triton.autotune(
+    configs=fast_autotune_configs(persistent=True),
+    key=['E', 'N', 'K'],
+    reset_to_zero=['c_ptr']
+)(grouped_mm_gather_scatter_kernel)
+
+_max_autotune_grouped_mm_gather_scatter_kernel = triton.autotune(
+    configs=max_autotune_configs(persistent=True),
+    key=['E', 'N', 'K'],
+    reset_to_zero=['c_ptr']
+)(grouped_mm_gather_scatter_kernel)
+
 def get_output_rows(a_rows, gather_indices, scatter_indices, output_rows):
     if output_rows is not None:
         return output_rows
@@ -120,11 +142,11 @@ def get_output_rows(a_rows, gather_indices, scatter_indices, output_rows):
     if gather_indices is None and scatter_indices is not None:
         # this is a kernel call, which can be avoided by passing in output_rows
         return scatter_indices.max() + 1
-    # if we don't scatter or gather, then it's just a normal matmul,
+    # if we don't scatter or gather, then it's just a normal grouped_mm,
     # so size of output matches input
     return a_rows
 
-def matmul_gather_scatter(
+def grouped_mm_gather_scatter(
     a: torch.Tensor,
     b: torch.Tensor,
     group_indices: torch.Tensor,
@@ -132,7 +154,9 @@ def matmul_gather_scatter(
     scatter_indices: Optional[torch.Tensor] = None,
     scales: Optional[torch.Tensor] = None,
     scales_indices: Optional[torch.Tensor] = None,
-    output_rows: Optional[int] = None
+    topk: Optional[int] = None,
+    output_rows: Optional[int] = None,
+    autotune_mode: Optional[AutotuneMode] = None
 ):
     assert a.dim() == 2
     assert b.dim() == 3
@@ -141,13 +165,23 @@ def matmul_gather_scatter(
     assert group_indices.dim() == 1
     assert gather_indices is None or gather_indices.dim() == 1
     assert scatter_indices is None or scatter_indices.dim() == 1
+    assert autotune_mode is None or autotune_mode in AutotuneMode
 
     e, k, n = b.size()
 
+    default_kwargs = {}
+    if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
+        default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_PROGRAMS": get_gpu_sm_count()}
+        func = grouped_mm_gather_scatter_kernel
+    elif autotune_mode == AutotuneMode.FAST:
+        func = _fast_autotune_grouped_mm_gather_scatter_kernel
+    elif autotune_mode == AutotuneMode.MAX:
+        func = _max_autotune_grouped_mm_gather_scatter_kernel
+
     c_rows = get_output_rows(a.size(0), gather_indices, scatter_indices, output_rows)
     c = torch.zeros((c_rows, n), device=a.device, dtype=a.dtype)
-    num_programs = get_gpu_sm_count(a.device)
-    matmul_gather_scatter_kernel[(num_programs,)](
+    grid = lambda META: (META["NUM_PROGRAMS"],)
+    func[grid](
         a, 
         b, 
         c, 
@@ -156,16 +190,15 @@ def matmul_gather_scatter(
         scatter_indices,
         scales,
         scales_indices,
+        ACC_DTYPE=tl.float32,
         E=e, 
         K=k, 
         N=n,
+        TOPK=topk,
         GATHER_ROWS=gather_indices is not None,
         SCATTER_ROWS=scatter_indices is not None,
         SCALE_ROWS=scales is not None,
-        NUM_PROGRAMS=num_programs,
-        BLOCK_M=32,
-        BLOCK_N=32,
-        BLOCK_K=32
+        **default_kwargs
     )
 
     return c
