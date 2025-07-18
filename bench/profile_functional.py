@@ -1,6 +1,6 @@
 import math
 import torch
-from torch.profiler import profile, record_function, ProfilerActivity
+from torch.profiler import profile, schedule, record_function, ProfilerActivity
 from moe_explore.functional.forward import (
     topk_moe_naive_forward,
     topk_moe_matmul_gather_scatter_forward,
@@ -22,15 +22,16 @@ def generate_inputs(
     return (input, router_weight, expert_weights1, expert_weights2)
 
 seq_len = 16 * 2048
-input_dim = 256
-hidden_dim = 256
+input_dim = 512
+hidden_dim = 512
 num_experts = 64
 topk = 6
 activation = torch.nn.functional.gelu
 input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
         "cuda", torch.float16, seq_len, input_dim, hidden_dim, num_experts)
 
-f = lambda: topk_moe_matmul_gather_scatter_forward(
+def f():
+    return topk_moe_matmul_gather_scatter_forward(
         input,
         router_weight,
         expert_weights1,
@@ -41,15 +42,24 @@ f = lambda: topk_moe_matmul_gather_scatter_forward(
         activation
     )
 
-for i in range(5): f()
-
-#with profile(activities=[
+#with profile(
+#    activities=[
 #        ProfilerActivity.CPU, 
 #        ProfilerActivity.CUDA
-#    ]) as prof:
+#    ],
+#    schedule=schedule(wait=1, warmup=5, active=10),
+#    with_stack=True
+#) as prof:
+#    for i in range(20):
+#        f()
+#        prof.step()
+
+#print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+#print(prof)
+#prof.export_chrome_trace("trace.json")
+
+for i in range(10): f()
 torch.cuda.cudart().cudaProfilerStart()
 f()
 torch.cuda.cudart().cudaProfilerStop()
 
-#print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-#prof.export_chrome_trace("trace.json")
