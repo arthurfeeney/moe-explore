@@ -11,6 +11,7 @@ def naive_grouped_mm_gather_scatter(
     scatter_indices=None, 
     scales=None, 
     scales_indices=None,
+    topk=None,
     output_rows=None
 ):
     c_rows = get_output_rows(a.size(0), gather_indices, scatter_indices, output_rows)
@@ -46,12 +47,13 @@ def cmp(
     scatter_indices=None, 
     scales=None, 
     scales_indices=None,
+    topk=None,
     output_rows=None
 ):
     out = grouped_mm_gather_scatter(
         a, b, group_indices, gather_indices, scatter_indices, scales, scales_indices, output_rows)
     ref = naive_grouped_mm_gather_scatter(
-        a, b, group_indices, gather_indices, scatter_indices, scales, scales_indices, output_rows)
+        a, b, group_indices, gather_indices, scatter_indices, scales, scales_indices, topk, output_rows)
 
     assert out.dtype == a.dtype
     assert out.size() == ref.size()

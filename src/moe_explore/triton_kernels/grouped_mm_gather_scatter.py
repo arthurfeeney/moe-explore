@@ -3,7 +3,11 @@ import triton
 import triton.language as tl
 from typing import Optional
 from moe_explore.gpu_utils import get_gpu_sm_count
-from moe_explore.autotune_config import AutotuneMode, fast_autotune_configs, max_autotune_configs
+from .autotune_config import (
+    AutotuneMode, 
+    fast_autotune_configs, 
+    max_autotune_configs
+)
 
 @triton.jit
 def grouped_mm_gather_scatter_kernel(
@@ -22,10 +26,12 @@ def grouped_mm_gather_scatter_kernel(
     # Scales use a different set of indices
     scales_ptr,
     scales_indices_ptr,
+    ACC_DTYPE: tl.constexpr,
     # E determines the number of problems.
     E: tl.constexpr,
     K: tl.constexpr,
     N: tl.constexpr,
+    TOPK: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
     SCALE_ROWS: tl.constexpr,
@@ -73,7 +79,7 @@ def grouped_mm_gather_scatter_kernel(
             b_col_offsets = tile_n_offsets 
             b_ptrs = b_ptr + b_problem_offset + b_row_offsets + b_col_offsets 
 
-            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
             for k in range(0, tl.cdiv(K, BLOCK_K)):
                 # Potentially gather some garbage rows, so zero-mask some rows of a
                 a_block = tl.load(a_ptrs, mask=gather_scatter_mask[:, None], other=0.0)
@@ -81,6 +87,8 @@ def grouped_mm_gather_scatter_kernel(
                 acc = tl.dot(a_block, b_block, acc=acc) 
                 a_ptrs += BLOCK_K
                 b_ptrs += BLOCK_K * N
+ 
+            # TODO: cast before or after scaling?
             acc = tl.cast(acc, tl.float16)
 
             c_col_offsets = tile_n_offsets
@@ -146,6 +154,7 @@ def grouped_mm_gather_scatter(
     scatter_indices: Optional[torch.Tensor] = None,
     scales: Optional[torch.Tensor] = None,
     scales_indices: Optional[torch.Tensor] = None,
+    topk: Optional[int] = None,
     output_rows: Optional[int] = None,
     autotune_mode: Optional[AutotuneMode] = None
 ):
@@ -181,9 +190,11 @@ def grouped_mm_gather_scatter(
         scatter_indices,
         scales,
         scales_indices,
+        ACC_DTYPE=tl.float32,
         E=e, 
         K=k, 
         N=n,
+        TOPK=topk,
         GATHER_ROWS=gather_indices is not None,
         SCATTER_ROWS=scatter_indices is not None,
         SCALE_ROWS=scales is not None,

@@ -73,6 +73,7 @@ def topk_moe_matmul_gather_scatter_forward(
             scatter_indices=gather_scatter_indices,
             scales=topk_scores.view(-1),
             scales_indices=indices.view(-1),
+            topk=topk,
             output_rows=input.size(0)
         )
     return h
