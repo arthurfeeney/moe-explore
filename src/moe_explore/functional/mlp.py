@@ -92,24 +92,20 @@ def moe_mlp_grouped_gemm(
     activation,
     autotune_mode = None
 ):
-    with record_function("router"):
-        topk_scores, topk_indices = topk_router(input, router_weight, topk)
-    with record_function("input_permute"):
-        group_token = expert_input_permute(input, topk_indices, topk, num_experts)
-    with record_function("moe"):
-        group_token.tokens = grouped_mm_gather_scatter(
-                group_token.tokens, 
-                expert_weights1, 
-                group_token.group_indices,
-                autotune_mode=autotune_mode
-        )
-        group_token.tokens = activation(group_token.tokens)
-        group_token.tokens = grouped_mm_gather_scatter(
-                group_token.tokens, 
-                expert_weights2, 
-                group_token.group_indices,
-                autotune_mode=autotune_mode
-        )
-    with record_function("output_permute"):
-        output = expert_output_permute(group_token, topk_scores, input.size())
+    topk_scores, topk_indices = topk_router(input, router_weight, topk)
+    group_token = expert_input_permute(input, topk_indices, num_experts=num_experts, topk=topk)
+    group_token.tokens = grouped_mm_gather_scatter(
+            group_token.tokens, 
+            expert_weights1, 
+            group_token.group_indices,
+            autotune_mode=autotune_mode
+    )
+    group_token.tokens = activation(group_token.tokens)
+    group_token.tokens = grouped_mm_gather_scatter(
+            group_token.tokens, 
+            expert_weights2, 
+            group_token.group_indices,
+            autotune_mode=autotune_mode
+    )
+    output = expert_output_permute(group_token, topk_scores, input.size())
     return output

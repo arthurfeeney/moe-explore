@@ -23,7 +23,7 @@ def get_token_indices(
     zero_prefix=False
 ):
     flat_expert_indices = expert_indices.view(-1)
-    indices = flat_expert_indices.argsort(stable=True)
+    indices = flat_expert_indices.argsort()
     counts = torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts)
 
     if zero_prefix:
@@ -35,9 +35,9 @@ def get_token_indices(
 
     permute_indices = indices // topk
     return PermToGroupIndices(
-        group_indices,
-        permute_indices,
-        indices
+        group_indices=group_indices,
+        permute_indices=permute_indices,
+        indices=indices
     )
 
 @torch.compile
@@ -54,7 +54,7 @@ def expert_input_permute(
         tokens=output,
         group_indices=indices.group_indices,
         permute_indices=indices.permute_indices,
-        indices=indices.indices, 
+        indices=indices.indices 
     )
 
 @torch.compile
