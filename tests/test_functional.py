@@ -9,7 +9,8 @@ from moe_explore.functional.mlp import (
 )
 from moe_explore.functional.glu import (
     moe_glu_torch,
-    moe_glu_grouped_gemm_fused
+    moe_glu_grouped_gemm_fused,
+    moe_glu_grouped_gemm
 )
 from moe_explore.router import topk_router
 from typing import Callable, Union
@@ -148,3 +149,50 @@ def test_moe_mlp_grouped_gemm_fused(
     assert gg_output.size() == inputs.input.size()
     assert gg_output.size() == ref_output.size()
     assert torch.allclose(ref_output, gg_output, atol=1e-2, rtol=1e-2)
+
+@pytest.mark.parametrize("params", test_params)
+def test_moe_glu_grouped_gemm_fused(
+    params
+):
+    inputs = params.generate_inputs(use_mlp=False)
+
+    gg_fused_output = moe_glu_grouped_gemm_fused(
+        inputs.input,
+        inputs.router_weight,
+        inputs.gate_weight,
+        inputs.up_weight,
+        inputs.down_weight,
+        params.input_dim,
+        params.num_experts,
+        params.topk,
+        params.activation
+    )
+
+    gg_output = moe_glu_grouped_gemm(
+        inputs.input,
+        inputs.router_weight,
+        inputs.gate_weight,
+        inputs.up_weight,
+        inputs.down_weight,
+        params.input_dim,
+        params.num_experts,
+        params.topk,
+        params.activation
+    )
+
+    ref_output = moe_glu_torch(
+        inputs.input,
+        inputs.router_weight,
+        inputs.gate_weight,
+        inputs.up_weight,
+        inputs.down_weight,
+        params.input_dim,
+        params.num_experts,
+        params.topk,
+        params.activation
+    )
+
+    assert gg_output.size() == inputs.input.size()
+    assert gg_output.size() == ref_output.size()
+    assert torch.allclose(ref_output, gg_output, atol=1e-1, rtol=4e-2)
+    assert torch.allclose(ref_output, gg_fused_output, atol=1e-1, rtol=4e-2)
