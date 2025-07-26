@@ -9,14 +9,22 @@ class GroupedTokens:
     permute_indices: torch.Tensor
     indices: torch.Tensor
 
+@dataclass
+class PermToGroupIndices:
+    group_indices: torch.Tensor
+    permute_indices: torch.Tensor
+    indices: torch.Tensor
+
 @torch.compile
-def get_token_indices(expert_indices, topk, zero_prefix=False):
+def get_token_indices(
+    expert_indices, 
+    topk, 
+    num_experts,
+    zero_prefix=False
+):
     flat_expert_indices = expert_indices.view(-1)
-    # TODO: is the argsort really necessary?
-    indices = flat_expert_indices.argsort()
-    # TODO: bincount is slow and not compileable.
-    # can be replaced with histc
-    counts = flat_expert_indices.bincount()
+    indices = flat_expert_indices.argsort(stable=True)
+    counts = torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts)
 
     if zero_prefix:
         group_indices = torch.empty(counts.size(0) + 1, dtype=torch.int64, device=expert_indices.device)
@@ -24,24 +32,32 @@ def get_token_indices(expert_indices, topk, zero_prefix=False):
         torch.cumsum(counts, dim=0, out=group_indices[1:])
     else:
         group_indices = counts.cumsum(dim=0)
-    permute_indices = indices // topk
-    return indices, group_indices, permute_indices
 
+    permute_indices = indices // topk
+    return PermToGroupIndices(
+        group_indices,
+        permute_indices,
+        indices
+    )
+
+@torch.compile
 def expert_input_permute(
     tokens: torch.Tensor, 
     expert_indices: torch.Tensor, 
+    num_experts: int,
     topk: int
 ) -> GroupedTokens:
-    indices, group_indices, permute_indices = get_token_indices(expert_indices, topk, zero_prefix=True)
+    indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=True)
     token_dim = tokens.size(1)
-    output = torch.gather(tokens, dim=0, index=permute_indices.unsqueeze(1).expand(-1, token_dim))
+    output = torch.gather(tokens, dim=0, index=indices.permute_indices.unsqueeze(1).expand(-1, token_dim))
     return GroupedTokens(
         tokens=output,
-        group_indices=group_indices,
-        permute_indices=permute_indices,
-        indices=indices, 
+        group_indices=indices.group_indices,
+        permute_indices=indices.permute_indices,
+        indices=indices.indices, 
     )
 
+@torch.compile
 def expert_output_permute(
     grouped_tokens: GroupedTokens,
     expert_scores: torch.Tensor,
@@ -51,7 +67,7 @@ def expert_output_permute(
     output = torch.zeros(output_shape, dtype=grouped_tokens.tokens.dtype, device=grouped_tokens.tokens.device)
     output.scatter_reduce_(
         0,
-        # scatter_reduce_ doesn't broadcast indices, so repeat indices along hidden dim. `.expand` returns a view
+        # expand is used because scatter_reduce_ doesn't broadcast
         grouped_tokens.permute_indices.view(-1, 1).expand(-1, output_shape[-1]),
         grouped_tokens.tokens,
         reduce='sum'

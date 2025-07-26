@@ -1,16 +1,19 @@
 import pytest
 import torch
 import math
-from moe_explore.functional.forward import (
-    topk_moe_naive_forward, 
-    topk_moe_group_gemm_forward,
-    topk_moe_matmul_gather_scatter_forward
+from moe_explore.functional.mlp import (
+    moe_mlp_torch, 
+    moe_mlp_grouped_gemm_fused,
+    moe_mlp_grouped_gemm
 )
+from moe_explore.router import topk_router
 
 test_params = [
     ('cuda', torch.float16, 128, 128, 256, 1, 1, torch.nn.functional.gelu),
     ('cuda', torch.float16, 256, 1024, 1024, 1, 1, torch.nn.functional.gelu),
-    ('cuda', torch.float16, 999, 2048, 2048, 1, 1, torch.nn.functional.gelu)
+    ('cuda', torch.float16, 999, 2048, 2048, 1, 1, torch.nn.functional.gelu),
+    ('cuda', torch.bfloat16, 999, 2048, 2048, 1, 1, torch.nn.functional.gelu),
+    ('cuda', torch.float32, 999, 2048, 2048, 1, 1, torch.nn.functional.gelu)
 ]
 
 def generate_inputs(
@@ -28,7 +31,7 @@ def generate_inputs(
     return (input, router_weight, expert_weights1, expert_weights2)
 
 @pytest.mark.parametrize("device,dtype,seq_len,input_dim,hidden_dim,num_experts,topk,activation", test_params)
-def test_topk_moe_naive_forward(
+def test_moe_mlp_torch(
     device,
     dtype,
     seq_len,
@@ -41,7 +44,7 @@ def test_topk_moe_naive_forward(
     input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
             device, dtype, seq_len, input_dim, hidden_dim, num_experts)
 
-    output = topk_moe_naive_forward(
+    output = moe_mlp_torch(
         input,
         router_weight,
         expert_weights1,
@@ -55,7 +58,7 @@ def test_topk_moe_naive_forward(
     assert output.size() == input.size()
 
 @pytest.mark.parametrize("device,dtype,seq_len,input_dim,hidden_dim,num_experts,topk,activation", test_params)
-def test_topk_moe_matmul_gather_scatter_forward(
+def test_moe_mlp_grouped_gemm(
     device,
     dtype,
     seq_len,
@@ -68,7 +71,7 @@ def test_topk_moe_matmul_gather_scatter_forward(
     input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
             device, dtype, seq_len, input_dim, hidden_dim, num_experts)
 
-    gg_output = topk_moe_matmul_gather_scatter_forward(
+    gg_output = moe_mlp_grouped_gemm(
         input,
         router_weight,
         expert_weights1,
@@ -79,7 +82,7 @@ def test_topk_moe_matmul_gather_scatter_forward(
         activation
     )
 
-    ref_output = topk_moe_naive_forward(
+    ref_output = moe_mlp_torch(
         input,
         router_weight,
         expert_weights1,
@@ -95,7 +98,7 @@ def test_topk_moe_matmul_gather_scatter_forward(
     assert torch.allclose(ref_output, gg_output, atol=1e-2, rtol=1e-2)
 
 @pytest.mark.parametrize("device,dtype,seq_len,input_dim,hidden_dim,num_experts,topk,activation", test_params)
-def test_topk_moe_group_gemm_forward(
+def test_moe_mlp_grouped_gemm_fused(
     device,
     dtype,
     seq_len,
@@ -108,7 +111,7 @@ def test_topk_moe_group_gemm_forward(
     input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
             device, dtype, seq_len, input_dim, hidden_dim, num_experts)
 
-    gg_output = topk_moe_group_gemm_forward(
+    gg_output = moe_mlp_grouped_gemm_fused(
         input,
         router_weight,
         expert_weights1,
@@ -119,7 +122,7 @@ def test_topk_moe_group_gemm_forward(
         activation
     )
 
-    ref_output = topk_moe_naive_forward(
+    ref_output = moe_mlp_torch(
         input,
         router_weight,
         expert_weights1,
@@ -133,3 +136,5 @@ def test_topk_moe_group_gemm_forward(
     assert gg_output.size() == input.size()
     assert gg_output.size() == ref_output.size()
     assert torch.allclose(ref_output, gg_output, atol=1e-2, rtol=1e-2)
+
+

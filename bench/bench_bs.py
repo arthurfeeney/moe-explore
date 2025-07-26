@@ -20,21 +20,22 @@ from external.sglang_fused_moe import sglang_fused_moe
 def generate_inputs(
     device,
     dtype,
+    batch_size,
     seq_len,
     input_dim,
     hidden_dim,
     num_experts
 ):
-    input = torch.randn((seq_len, input_dim), device=device, dtype=dtype)
+    input = torch.randn((batch_size * seq_len, input_dim), device=device, dtype=dtype)
     router_weight = torch.randn((input_dim, num_experts), device=device, dtype=dtype) / math.sqrt(input_dim)
     expert_weights1 = torch.randn((num_experts, input_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(input_dim)
     expert_weights2 = torch.randn((num_experts, hidden_dim, input_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim)
     return (input, router_weight, expert_weights1, expert_weights2)
 
-def moe_benchmark(plot_name, num_experts, seq_len, hidden_dim, input_dim, activation):
+def moe_benchmark(plot_name, num_experts, act_experts, seq_len, hidden_dim, input_dim, activation):
     return Benchmark(
-        x_names=["topk"],
-        x_vals=[1, 2, 4, 8, 16],
+        x_names=["batch_size"],
+        x_vals=[1, 4],
         line_arg="provider",
         line_vals=["naive", "group_gemm", "fused", "scattermoe", "sglang"],
         line_names=["Naive", "Group GEMM", "Fused", "ScatterMoE", "SGLang"],
@@ -49,6 +50,7 @@ def moe_benchmark(plot_name, num_experts, seq_len, hidden_dim, input_dim, activa
         plot_name=plot_name,
         args={
             "num_experts": num_experts,
+            "act_experts": act_experts,
             "seq_len": seq_len,
             "hidden_dim": hidden_dim,
             "input_dim": input_dim,
@@ -56,35 +58,30 @@ def moe_benchmark(plot_name, num_experts, seq_len, hidden_dim, input_dim, activa
         })
 
 configs = []
-configs.append(
-        moe_benchmark(
-            "seq_len=2048, 64 256x256 Experts Forward",
-            num_experts=64,
-            seq_len=2048,
-            hidden_dim=256,
-            input_dim=256,
-            activation=torch.nn.functional.gelu
-        ))
-configs.append(
-        moe_benchmark(
-            "seq_len=32768, 64 512x512 Experts Forward",
-            num_experts=64,
-            seq_len=32768,
-            hidden_dim=512,
-            input_dim=512,
-            activation=torch.nn.functional.gelu
-        ))
+# TODO: Need SwiGLU variant...
+# TODO: this is too large for A30... damn lol
 """
 configs.append(
         moe_benchmark(
-            "seq_len=2048, 64 512x512 Experts Forward",
-            num_experts=64,
-            seq_len=2048,
-            hidden_dim=1024,
+            "Qwen3-30B-A3B, seq_len=64, 8/128 experts",
+            num_experts=128,
+            act_experts=8,
+            seq_len=64,
+            hidden_dim=768,
             input_dim=1024,
             activation=torch.nn.functional.gelu
         ))
 """
+configs.append(
+        moe_benchmark(
+            "OLMoE-1B-7B, seq_len=64, 8/64 experts",
+            num_experts=64,
+            act_experts=8,
+            seq_len=64,
+            input_dim=512,
+            hidden_dim=512,
+            activation=torch.nn.functional.gelu
+        ))
 
 def bench_moe_explore(
     func,
@@ -94,7 +91,7 @@ def bench_moe_explore(
     expert_weights2,
     input_dim,
     num_experts,
-    topk,
+    act_experts,
     activation
 ):
     with torch.no_grad():
@@ -106,22 +103,23 @@ def bench_moe_explore(
             expert_weights2,
             input_dim,
             num_experts,
-            topk,
+            act_experts,
             activation), quantiles=quantiles)
         return ms, min_ms, max_ms
 
 @perf_report(configs)
 def benchmark_moe_forward(
-    num_experts, 
+    num_experts,
+    act_experts,
     seq_len, 
     hidden_dim, 
     input_dim, 
     activation, 
-    topk, 
+    batch_size, 
     provider
 ):
     input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
-            "cuda", torch.float16, seq_len, input_dim, hidden_dim, num_experts)
+            "cuda", torch.float16, batch_size, seq_len, input_dim, hidden_dim, num_experts)
     
     moe_explore_options = ("naive", "group_gemm", "fused")
     if provider in moe_explore_options: 
@@ -139,17 +137,17 @@ def benchmark_moe_forward(
             expert_weights2,
             input_dim,
             num_experts,
-            topk,
+            act_experts,
             activation
         )
 
     elif provider == "scattermoe":
         # scatter moe is using a different set of randomly initialized weights,
         # but this should be computing effectively the same thing as moe explore
-        mlp = ScatterMoEMLP(input_dim, hidden_dim, num_experts, topk, activation)
+        mlp = ScatterMoEMLP(input_dim, hidden_dim, num_experts, act_experts, activation)
         mlp = mlp.to(torch.float16).to("cuda")
         ms, min_ms, max_ms = do_bench(
-                lambda: scattermoe_forward(input, router_weight, mlp, topk),
+                lambda: scattermoe_forward(input, router_weight, mlp, act_experts),
                 quantiles=[0.5, 0.2, 0.8])
 
     elif provider == "sglang":
@@ -159,7 +157,7 @@ def benchmark_moe_forward(
             router_weight,
             expert_weights1,
             expert_weights2,
-            topk,
+            act_experts,
             activation="gelu"
         ), quantiles=quantiles)
 
