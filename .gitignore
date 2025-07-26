@@ -1,6 +1,7 @@
 # triton bench outputs
 *.png
 *.csv
+*.hatchet
 
 # chrome traces
 *.json
