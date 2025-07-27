@@ -9,8 +9,9 @@ def softmax_topk_router(
     router_weight: torch.Tensor,
     topk: int
 ):
-    scores = (input @ router_weight).softmax(dim=-1)
+    scores = nn.functional.softmax(input @ router_weight, dim=-1, dtype=torch.float32)
     topk_scores, topk_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    topk_scores = topk_scores.to(input.dtype)
     return topk_scores, topk_indices
 
 def topk_softmax_router(
