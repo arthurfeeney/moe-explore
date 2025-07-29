@@ -4,24 +4,19 @@ from torch.profiler import record_function
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.triton_kernels.grouped_mm_gather_scatter import grouped_mm_gather_scatter
+from moe_explore.params import GLUParams, MOEParams
 
 def moe_glu_torch(
     input,
-    router_weight,
-    gate_weight,
-    up_weight,
-    down_weight,
-    input_dim,
-    num_experts,
-    topk,
-    activation,
+    params: MOEParams,
     autotune_mode = None
 ):
+    ep: GLUParams = params.expert_params
     with record_function("router"):
-        topk_scores, topk_indices = topk_router(input, router_weight, topk)
+        topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
         flat_expert_weights = topk_scores.view(-1, 1)
         #idxs, tokens_per_expert, token_idxs = get_token_indices(topk_indices, topk, num_experts)
-        perm_to_group_indices = get_token_indices(topk_indices, topk, num_experts)
+        perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts)
 
     with record_function("moe"):
         expert_cache = torch.zeros_like(input)
@@ -32,10 +27,10 @@ def moe_glu_torch(
             exp_token_idxs = perm_to_group_indices.permute_indices[start_idx:end_idx]
             expert_tokens = input[exp_token_idxs]
             
-            expert_gate = expert_tokens @ gate_weight[expert_id]
-            expert_gate = activation(expert_gate)
-            expert_up = expert_tokens @ up_weight[expert_id]
-            expert_out = (expert_gate * expert_up) @ down_weight[expert_id]
+            expert_gate = expert_tokens @ ep.gate_weight[expert_id]
+            expert_gate = ep.activation(expert_gate)
+            expert_up = expert_tokens @ ep.up_weight[expert_id]
+            expert_out = (expert_gate * expert_up) @ ep.down_weight[expert_id]
 
             # scale by scores and reduce
             expert_out.mul_(flat_expert_weights[perm_to_group_indices.indices[start_idx:end_idx]])
@@ -49,31 +44,25 @@ def moe_glu_torch(
 
 def moe_glu_grouped_gemm_fused(
     input: torch.Tensor,
-    router_weight: torch.Tensor,
-    gate_weight: torch.Tensor,
-    up_weight: torch.Tensor,
-    down_weight: torch.Tensor,
-    input_dim: int,
-    num_experts: int,
-    topk: int,
-    activation,
+    params: MOEParams,
     autotune_mode = None
 ):
-    topk_scores, topk_indices = topk_router(input, router_weight, topk)
-    perm_to_group_indices = get_token_indices(topk_indices, topk, num_experts, zero_prefix=True)
+    ep: GLUParams = params.expert_params
+    topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
+    perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
 
     gate = grouped_mm_gather_scatter(
         input, 
-        gate_weight, 
+        ep.gate_weight, 
         perm_to_group_indices.group_indices,
         gather_indices=perm_to_group_indices.permute_indices,
         autotune_mode=autotune_mode
     )
-    gate = activation(gate)
+    gate = ep.activation(gate)
 
     up = grouped_mm_gather_scatter(
         input, 
-        up_weight, 
+        ep.up_weight, 
         perm_to_group_indices.group_indices,
         gather_indices=perm_to_group_indices.permute_indices,
         autotune_mode=autotune_mode
@@ -83,13 +72,13 @@ def moe_glu_grouped_gemm_fused(
 
     down = grouped_mm_gather_scatter(
         gated,
-        down_weight,
+        ep.down_weight,
         group_indices=perm_to_group_indices.group_indices,
         gather_indices=None,
         scatter_indices=perm_to_group_indices.permute_indices,
         scales=topk_scores.view(-1),
         scales_indices=perm_to_group_indices.indices.view(-1),
-        topk=topk,
+        topk=params.topk,
         output_rows=input.size(0),
         autotune_mode=autotune_mode
     )
@@ -97,36 +86,30 @@ def moe_glu_grouped_gemm_fused(
 
 def moe_glu_grouped_gemm(
     input: torch.Tensor,
-    router_weight: torch.Tensor,
-    gate_weight: torch.Tensor,
-    up_weight: torch.Tensor,
-    down_weight: torch.Tensor,
-    input_dim: int,
-    num_experts: int,
-    topk: int,
-    activation,
+    params: MOEParams,
     autotune_mode = None
 ):
-    topk_scores, topk_indices = topk_router(input, router_weight, topk)
-    group_token = expert_input_permute(input, topk_indices, num_experts=num_experts, topk=topk)
+    ep: GLUParams = params.expert_params
+    topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
+    group_token = expert_input_permute(input, topk_indices, num_experts=params.num_experts, topk=params.topk)
     
     gate = grouped_mm_gather_scatter(
             group_token.tokens, 
-            gate_weight, 
+            ep.gate_weight, 
             group_token.group_indices,
             autotune_mode=autotune_mode
     )
-    gate = activation(gate)
+    gate = ep.activation(gate)
     up = grouped_mm_gather_scatter(
             group_token.tokens, 
-            up_weight, 
+            ep.up_weight, 
             group_token.group_indices,
             autotune_mode=autotune_mode
     )
     gated = up * gate
     group_token.tokens = grouped_mm_gather_scatter(
             gated, 
-            down_weight, 
+            ep.down_weight, 
             group_token.group_indices,
             autotune_mode=autotune_mode
     )

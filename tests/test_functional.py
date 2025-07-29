@@ -16,6 +16,7 @@ from moe_explore.functional.glu import (
     moe_glu_grouped_gemm_fused,
     moe_glu_grouped_gemm
 )
+from moe_explore.params import MOEParams, random_glu, random_mlp
 from moe_explore.hf_moe_reference import qwen3_moe_forward, olmoe_forward
 
 @dataclass
@@ -49,20 +50,32 @@ class Params:
             dtype = self.dtype
         return torch.randn(size, device=self.device, dtype=dtype)
 
+    def random_input(self):
+        return self.random((self.seq_len, self.input_dim))
+
+    def random_params(self, func):
+        return func(
+            self.num_experts,
+            self.input_dim,
+            self.hidden_dim,
+            self.activation,
+            self.device,
+            self.dtype
+        )
+
     def generate_mlp_inputs(self):
-        input = self.random((self.seq_len, self.input_dim)) #torch.randn((self.seq_len, self.input_dim), device=device, dtype=dtype)
-        router_weight = self.random((self.input_dim, self.num_experts)) / math.sqrt(self.num_experts)
-        weight1 = self.random((self.num_experts, self.input_dim, self.hidden_dim)) / math.sqrt(self.input_dim)
-        weight2 = self.random((self.num_experts, self.hidden_dim, self.input_dim)) / math.sqrt(self.hidden_dim)
-        return MLPInput(input, router_weight, weight1, weight2)
+        return MOEParams(
+            self.random_params(random_mlp),
+            self.num_experts,
+            self.topk
+        )
 
     def generate_glu_inputs(self):
-        input = self.random((self.seq_len, self.input_dim)) #torch.randn((self.seq_len, self.input_dim), device=device, dtype=dtype)
-        router_weight = self.random((self.input_dim, self.num_experts)) / math.sqrt(self.num_experts)
-        gate = self.random((self.num_experts, self.input_dim, self.hidden_dim)) / math.sqrt(self.input_dim)
-        up = self.random((self.num_experts, self.input_dim, self.hidden_dim)) / math.sqrt(self.hidden_dim)
-        down = self.random((self.num_experts, self.hidden_dim, self.input_dim)) / math.sqrt(self.hidden_dim)
-        return GLUInput(input, router_weight, gate_weight=gate, up_weight=up, down_weight=down)
+        return MOEParams(
+            self.random_params(random_glu),
+            self.num_experts,
+            self.topk
+        )
 
 test_params = [
     Params('cuda', torch.float16, 128, 128, 256, num_experts=8, topk=2, activation=torch.nn.functional.gelu),
@@ -78,139 +91,81 @@ test_params = [
 def test_moe_mlp_torch(
         params
 ):
-    inputs = params.generate_mlp_inputs()
+    input = params.random_input()
+    moe_params = params.generate_mlp_inputs()
 
     output = moe_mlp_torch(
-        inputs.input,
-        inputs.router_weight,
-        inputs.weight1,
-        inputs.weight2,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
+        input,
+        moe_params
     )
 
-    assert output.size() == inputs.input.size()
+    assert output.size() == input.size()
 
 @pytest.mark.parametrize("params", test_params)
 def test_moe_mlp_grouped_gemm(
     params
 ):
-    inputs = params.generate_mlp_inputs()
+    input = params.random_input()
+    moe_params = params.generate_mlp_inputs()
+
+    gg_fused_output = moe_mlp_grouped_gemm_fused(
+        input,
+        moe_params
+    )
 
     gg_output = moe_mlp_grouped_gemm(
-        inputs.input,
-        inputs.router_weight,
-        inputs.weight1,
-        inputs.weight2,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
+        input,
+        moe_params
     )
 
     ref_output = moe_mlp_torch(
-        inputs.input,
-        inputs.router_weight,
-        inputs.weight1,
-        inputs.weight2,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
+        input,
+        moe_params
     )
 
-    assert gg_output.size() == inputs.input.size()
+    assert gg_fused_output.size() == input.size()
+    assert gg_fused_output.size() == ref_output.size()
+    assert gg_output.size() == input.size()
     assert gg_output.size() == ref_output.size()
     assert torch.allclose(ref_output, gg_output, atol=1e-2, rtol=1e-2)
-
-@pytest.mark.parametrize("params", test_params)
-def test_moe_mlp_grouped_gemm_fused(
-    params
-):
-    inputs = params.generate_mlp_inputs()
-
-    gg_output = moe_mlp_grouped_gemm_fused(
-        inputs.input,
-        inputs.router_weight,
-        inputs.weight1,
-        inputs.weight2,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
-    )
-
-    ref_output = moe_mlp_torch(
-        inputs.input,
-        inputs.router_weight,
-        inputs.weight1,
-        inputs.weight2,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
-    )
-
-    assert gg_output.size() == inputs.input.size()
-    assert gg_output.size() == ref_output.size()
-    assert torch.allclose(ref_output, gg_output, atol=1e-2, rtol=1e-2)
+    assert torch.allclose(ref_output, gg_fused_output, atol=1e-2, rtol=1e-2)
 
 @pytest.mark.parametrize("params", test_params)
 def test_moe_glu_grouped_gemm_fused(
     params
 ):
-    inputs = params.generate_glu_inputs()
+    input = params.random_input()
+    moe_params = params.generate_glu_inputs()
 
     gg_fused_output = moe_glu_grouped_gemm_fused(
-        inputs.input,
-        inputs.router_weight,
-        inputs.gate_weight,
-        inputs.up_weight,
-        inputs.down_weight,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
+        input,
+        moe_params
     )
 
     gg_output = moe_glu_grouped_gemm(
-        inputs.input,
-        inputs.router_weight,
-        inputs.gate_weight,
-        inputs.up_weight,
-        inputs.down_weight,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
+        input,
+        moe_params
     )
 
     ref_output = moe_glu_torch(
-        inputs.input,
-        inputs.router_weight,
-        inputs.gate_weight,
-        inputs.up_weight,
-        inputs.down_weight,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        params.activation
+        input,
+        moe_params
     )
 
-    assert gg_output.size() == inputs.input.size()
+    assert gg_output.size() == input.size()
     assert gg_output.size() == ref_output.size()
     assert torch.allclose(ref_output, gg_output, atol=1e-1, rtol=4e-2)
     assert torch.allclose(ref_output, gg_fused_output, atol=1e-1, rtol=4e-2)
 
 @pytest.mark.parametrize(
-    "device,seq_len,input_dim,hidden_dim",
+    "device,seq_len,input_dim,hidden_dim,Config,forward",
     [
-        ("cuda", 128, 2048, 1024)
+        ("cuda", 128, 2048, 1024, OlmoeConfig, olmoe_forward),
+        ("cuda", 128, 1024, 768, Qwen3MoeConfig, qwen3_moe_forward)
     ])
-def test_olmoe(device, seq_len, input_dim, hidden_dim):
-    config = OlmoeConfig(
+def test_olmoe(device, seq_len, input_dim, hidden_dim, Config, forward):
+
+    config = Config(
        hidden_size=input_dim,
        intermediate_size=hidden_dim,
     )
@@ -226,87 +181,21 @@ def test_olmoe(device, seq_len, input_dim, hidden_dim):
         torch.nn.functional.silu
     )
 
-    glu_input: GLUInput = params.generate_glu_inputs()
+    input = params.random_input()
+    moe_params = params.generate_glu_inputs()
 
-    olmoe_output = olmoe_forward(
+    ref_output = forward(
         config,
-        glu_input.input.unsqueeze(0),
-        glu_input.router_weight,
-        glu_input.gate_weight,
-        glu_input.up_weight,
-        glu_input.down_weight
+        input.unsqueeze(0),
+        moe_params
     )    
 
     gg_output = moe_glu_grouped_gemm(
-        glu_input.input,
-        glu_input.router_weight,
-        glu_input.gate_weight,
-        glu_input.up_weight,
-        glu_input.down_weight,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        activation=torch.nn.functional.silu
+        input,
+        moe_params
     )
 
-    assert torch.allclose(olmoe_output, gg_output, atol=1, rtol=1e-4)
+    # TODO: this is not testing the fused version
+    # because tl.atomic_add does not support bfloat16
 
-@pytest.mark.parametrize(
-    "device,seq_len,input_dim,hidden_dim",
-    [
-        ("cuda", 128, 2048, 1024)
-    ])
-def test_qwen3_moe(device, seq_len, input_dim, hidden_dim):
-    config = Qwen3MoeConfig(
-       hidden_size=input_dim,
-       intermediate_size=hidden_dim,
-    )
-
-    params = Params(
-        device,
-        torch.bfloat16,
-        seq_len,
-        input_dim,
-        hidden_dim,
-        config.num_experts,
-        config.num_experts_per_tok,
-        torch.nn.functional.silu
-    )
-
-    glu_input: GLUInput = params.generate_glu_inputs()
-
-    olmoe_output = qwen3_moe_forward(
-        config,
-        glu_input.input.unsqueeze(0),
-        glu_input.router_weight,
-        glu_input.gate_weight,
-        glu_input.up_weight,
-        glu_input.down_weight
-    )    
-
-    gg_output = moe_glu_grouped_gemm(
-        glu_input.input,
-        glu_input.router_weight,
-        glu_input.gate_weight,
-        glu_input.up_weight,
-        glu_input.down_weight,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        activation=torch.nn.functional.silu
-    )
-
-    gg_fused_output = moe_glu_grouped_gemm_fused(
-        glu_input.input,
-        glu_input.router_weight,
-        glu_input.gate_weight,
-        glu_input.up_weight,
-        glu_input.down_weight,
-        params.input_dim,
-        params.num_experts,
-        params.topk,
-        activation=torch.nn.functional.silu
-    )
-
-    assert torch.allclose(olmoe_output, gg_output, atol=1, rtol=1e-4)
-    assert torch.allclose(olmoe_output, gg_fused_output, atol=1, rtol=1e-4)
+    assert torch.allclose(ref_output, gg_output, atol=1, rtol=1e-4)
