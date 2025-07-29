@@ -4,6 +4,7 @@ from torch import nn
 def softmax(x):
     return nn.functional.softmax(x, dim=-1, dtype=torch.float32)
     
+@torch.compile
 def topk_router(
     input: torch.Tensor,
     router_weight: torch.Tensor,

@@ -1,45 +1,37 @@
 import math
 import torch
 from torch.profiler import profile, schedule, record_function, ProfilerActivity
-from moe_explore.functional.forward import (
-    topk_moe_naive_forward,
-    topk_moe_matmul_gather_scatter_forward,
-    topk_moe_group_gemm_forward
+from moe_explore.functional.glu import (
+    moe_glu_torch,
+    moe_glu_grouped_gemm,
+    moe_glu_grouped_gemm_fused
 )
-
-def generate_inputs(
-    device,
-    dtype,
-    seq_len,
-    input_dim,
-    hidden_dim,
-    num_experts
-):
-    input = torch.randn((seq_len, input_dim), device=device, dtype=dtype)
-    router_weight = torch.randn((input_dim, num_experts), device=device, dtype=dtype) / math.sqrt(input_dim)
-    expert_weights1 = torch.randn((num_experts, input_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(input_dim)
-    expert_weights2 = torch.randn((num_experts, hidden_dim, input_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim)
-    return (input, router_weight, expert_weights1, expert_weights2)
+from moe_explore.params import MOEParams, random_glu
+import triton.profiler as proton
 
 seq_len = 16 * 2048
-input_dim = 512
-hidden_dim = 512
-num_experts = 64
-topk = 6
-activation = torch.nn.functional.gelu
-input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
-        "cuda", torch.float16, seq_len, input_dim, hidden_dim, num_experts)
+input_dim = 1024
+hidden_dim = 768
+num_experts = 128
+topk = 8
+activation = torch.nn.functional.silu
+
+expert_params = random_glu(
+    num_experts,
+    input_dim,
+    hidden_dim,
+    activation,
+    "cuda",
+    torch.float16,
+)
+moe_params = MOEParams(expert_params, num_experts=num_experts, topk=topk)
+
+input = torch.randn((seq_len, input_dim), device="cuda", dtype=torch.float16)
 
 def f():
-    return topk_moe_matmul_gather_scatter_forward(
+    return moe_glu_grouped_gemm_fused(
         input,
-        router_weight,
-        expert_weights1,
-        expert_weights2,
-        input_dim,
-        num_experts,
-        topk,
-        activation
+        moe_params
     )
 
 #with profile(
@@ -58,8 +50,16 @@ def f():
 #print(prof)
 #prof.export_chrome_trace("trace.json")
 
-for i in range(10): f()
-torch.cuda.cudart().cudaProfilerStart()
-f()
-torch.cuda.cudart().cudaProfilerStop()
+#for i in range(10): f()
+#torch.cuda.cudart().cudaProfilerStart()
+#f()
+#torch.cuda.cudart().cudaProfilerStop()
 
+session_id = proton.start(name="moe", context="shadow")
+proton.deactivate()
+# warmup
+for i in range(3):
+    f()
+proton.activate()
+f()
+proton.finalize()
