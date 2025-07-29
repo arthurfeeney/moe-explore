@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from typing import Callable
 import torch
 from torch.profiler import record_function
 

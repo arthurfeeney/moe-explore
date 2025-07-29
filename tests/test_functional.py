@@ -3,6 +3,7 @@ import pytest
 import torch
 import math
 from transformers.models.olmoe.configuration_olmoe import OlmoeConfig
+from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from typing import Callable, Union
 
 from moe_explore.functional.mlp import (
@@ -15,7 +16,7 @@ from moe_explore.functional.glu import (
     moe_glu_grouped_gemm_fused,
     moe_glu_grouped_gemm
 )
-from moe_explore.hf_moe_reference import olmoe_forward
+from moe_explore.hf_moe_reference import qwen3_moe_forward, olmoe_forward
 
 @dataclass
 class MLPInput:
@@ -249,3 +250,63 @@ def test_olmoe(device, seq_len, input_dim, hidden_dim):
     )
 
     assert torch.allclose(olmoe_output, gg_output, atol=1, rtol=1e-4)
+
+@pytest.mark.parametrize(
+    "device,seq_len,input_dim,hidden_dim",
+    [
+        ("cuda", 128, 2048, 1024)
+    ])
+def test_qwen3_moe(device, seq_len, input_dim, hidden_dim):
+    config = Qwen3MoeConfig(
+       hidden_size=input_dim,
+       intermediate_size=hidden_dim,
+    )
+
+    params = Params(
+        device,
+        torch.bfloat16,
+        seq_len,
+        input_dim,
+        hidden_dim,
+        config.num_experts,
+        config.num_experts_per_tok,
+        torch.nn.functional.silu
+    )
+
+    glu_input: GLUInput = params.generate_glu_inputs()
+
+    olmoe_output = qwen3_moe_forward(
+        config,
+        glu_input.input.unsqueeze(0),
+        glu_input.router_weight,
+        glu_input.gate_weight,
+        glu_input.up_weight,
+        glu_input.down_weight
+    )    
+
+    gg_output = moe_glu_grouped_gemm(
+        glu_input.input,
+        glu_input.router_weight,
+        glu_input.gate_weight,
+        glu_input.up_weight,
+        glu_input.down_weight,
+        params.input_dim,
+        params.num_experts,
+        params.topk,
+        activation=torch.nn.functional.silu
+    )
+
+    gg_fused_output = moe_glu_grouped_gemm_fused(
+        glu_input.input,
+        glu_input.router_weight,
+        glu_input.gate_weight,
+        glu_input.up_weight,
+        glu_input.down_weight,
+        params.input_dim,
+        params.num_experts,
+        params.topk,
+        activation=torch.nn.functional.silu
+    )
+
+    assert torch.allclose(olmoe_output, gg_output, atol=1, rtol=1e-4)
+    assert torch.allclose(olmoe_output, gg_fused_output, atol=1, rtol=1e-4)

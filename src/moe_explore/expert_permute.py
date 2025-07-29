@@ -32,7 +32,7 @@ def get_token_indices(
         torch.cumsum(counts, dim=0, out=group_indices[1:])
     else:
         group_indices = counts.cumsum(dim=0)
-
+    
     permute_indices = indices // topk
     return PermToGroupIndices(
         group_indices=group_indices,
