@@ -5,6 +5,9 @@ on how tokens get routed for the wikitext dataset.
 
 import argparse
 from datasets import load_dataset, DatasetDict
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn
 from transformers import (
     AutoModelForCausalLM, 
     AutoConfig, 
@@ -12,8 +15,6 @@ from transformers import (
 )
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import seaborn
 
 OLMOE = "olmoe"
 QWEN3 = "qwen3"
@@ -37,18 +38,19 @@ def main():
     parser.add_argument(
         "--hf-cache-dir",
         type=str,
-        required=False
+        required=True
     )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"GPUs: {torch.cuda.device_count()}")
+    if device == "cuda":
+        print(f"GPUs: {torch.cuda.device_count()}")
 
     model_name = _MODEL_NAME_DICT[args.model_name]
-    model_config = AutoConfig.from_pretrained(model_name)
+    model_config = AutoConfig.from_pretrained(model_name, cache_dir=args.hf_cache_dir)
     model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            cache_dir="/pub/afeeney/huggingface/cache/",
+            cache_dir=args.hf_cache_dir,
             low_cpu_mem_usage=True,
             output_router_logits=True,
             device_map="auto"
@@ -58,8 +60,8 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenized_dataset = tokenized_wikitext(tokenizer)
 
-    seq_len = min(16000, tokenized_dataset.input_ids.size(1))
-    stride = 32
+    seq_len = min(1000, tokenized_dataset.input_ids.size(1))
+    stride = 64
 
     model.eval()
     with torch.no_grad():
@@ -73,16 +75,13 @@ def main():
                 count = torch.bincount(selected_experts.view(-1), minlength=model_config.num_experts)
                 expert_counts[layer_idx] += count 
 
-    expert_counts = expert_counts.cpu().numpy()
-    expert_percentages = expert_counts / seq_len
-    ax = seaborn.heatmap(expert_percentages)
-    ax.set(xlabel="Expert", ylabel="Layer")
-    plt.savefig(f"wikitext_percentages_{args.model_name}.png")
-
-    for idx in range(expert_percentages.shape[0]):
-        min_perc = expert_percentages[idx].min()
-        max_perc = expert_percentages[idx].max()
-        print(f"layer {idx}: min={min_perc}, max={max_perc}")
+    to_save = {
+        "expert_counts": expert_counts.detach().cpu(),
+        "num_tokens": seq_len,
+        "stride": stride,
+        "model_name": args.model_name
+    }
+    torch.save(to_save, f"wikitext_counts_{args.model_name}.pt")
 
 def tokenized_wikitext(tokenizer):
     dataset = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
@@ -97,7 +96,6 @@ def tokenized_wikitext(tokenizer):
     tokens = tokenizer("\n\n".join(token_dataset["text"]), return_tensors="pt")
     assert tokens.input_ids.dim() == 2
     return tokens
-
 
 def router(router_logits, topk):
     routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
