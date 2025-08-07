@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 import pytest
 import torch
-import math
 from transformers.models.olmoe.configuration_olmoe import OlmoeConfig
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from typing import Callable, Union
@@ -48,7 +47,8 @@ class Params:
     def random(self, size, dtype=None):
         if dtype is None:
             dtype = self.dtype
-        return torch.randn(size, device=self.device, dtype=dtype)
+        denom = size[-1]
+        return torch.randn(size, device=self.device, dtype=dtype) / denom
 
     def random_input(self):
         return self.random((self.seq_len, self.input_dim))
@@ -84,7 +84,7 @@ test_params = [
     # As of triton 3.3.1, atomic_add does not supprot bfloat16,
     # there isn't an instrction for it until sm90+.
     # leaving commented as I believe it's supported in newer versions
-    #Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, torch.nn.functional.gelu),
+    # Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, torch.nn.functional.gelu),
     Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, torch.nn.functional.gelu)
 ]
 
@@ -124,12 +124,10 @@ def test_moe_mlp_grouped_gemm(
         moe_params
     )
 
-    assert gg_fused_output.size() == input.size()
-    assert gg_fused_output.size() == ref_output.size()
-    assert gg_output.size() == input.size()
-    assert gg_output.size() == ref_output.size()
-    assert torch.allclose(ref_output, gg_output, atol=1e-2, rtol=1e-2)
-    assert torch.allclose(ref_output, gg_fused_output, atol=1e-2, rtol=1e-2)
+    assert gg_output.isfinite().all()
+    assert gg_fused_output.isfinite().all()
+    torch.testing.assert_close(ref_output, gg_output)
+    torch.testing.assert_close(ref_output, gg_fused_output)
 
 @pytest.mark.parametrize("params", test_params)
 def test_moe_glu_grouped_gemm_fused(
@@ -153,10 +151,10 @@ def test_moe_glu_grouped_gemm_fused(
         moe_params
     )
 
-    assert gg_output.size() == input.size()
-    assert gg_output.size() == ref_output.size()
-    assert torch.allclose(ref_output, gg_output, atol=1e-1, rtol=4e-2)
-    assert torch.allclose(ref_output, gg_fused_output, atol=1e-1, rtol=4e-2)
+    assert gg_output.isfinite().all()
+    assert gg_fused_output.isfinite().all()
+    torch.testing.assert_close(ref_output, gg_output)
+    torch.testing.assert_close(ref_output, gg_fused_output)
 
 @pytest.mark.parametrize(
     "device,seq_len,input_dim,hidden_dim,Config,forward",
@@ -189,14 +187,20 @@ def test_olmoe(device, seq_len, input_dim, hidden_dim, Config, forward):
         config,
         input.unsqueeze(0),
         moe_params
-    )    
+    ).squeeze(0)    
 
     gg_output = moe_glu_grouped_gemm(
         input,
         moe_params
     )
 
-    # TODO: this is not testing the fused version
-    # because tl.atomic_add does not support bfloat16
+    gg_fused_output = moe_glu_grouped_gemm_fused(
+        input,
+        moe_params
+    )
 
-    assert torch.allclose(ref_output, gg_output, atol=1, rtol=1e-4)
+    assert ref_output.isfinite().all()
+    assert gg_output.isfinite().all()
+    assert gg_fused_output.isfinite().all()
+    torch.testing.assert_close(ref_output, gg_output)
+    torch.testing.assert_close(ref_output, gg_fused_output)

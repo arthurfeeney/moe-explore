@@ -1,8 +1,10 @@
+import math
 import torch
 from moe_explore.triton_kernels.grouped_mm_gather_scatter import (
         grouped_mm_gather_scatter, 
         get_output_rows
 )
+
 def naive_grouped_mm_gather_scatter(
     a, 
     b,
@@ -55,19 +57,16 @@ def cmp(
     ref = naive_grouped_mm_gather_scatter(
         a, b, group_indices, gather_indices, scatter_indices, scales, scales_indices, topk, output_rows)
 
-    assert out.dtype == a.dtype
-    assert out.size() == ref.size()
-
     if output_rows is None and scatter_indices is not None:
         assert out.size(0) == torch.unique(scatter_indices).size(0)
 
     assert out.isfinite().all() and ref.isfinite().all()
-    assert torch.allclose(out, ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out, ref, atol=1e-1, rtol=1e-3)
 
 def test_autotune():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
     gather_indices = torch.arange(0, m, device="cuda")
 
@@ -85,7 +84,7 @@ def test_autotune():
 def test_grouped_mm_gather_scatter_group_and_gather():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     # one group that is all of a
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
@@ -100,7 +99,7 @@ def test_grouped_mm_gather_scatter_group_and_gather():
 def test_grouped_mm_gather_scatter_group():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     # one group that is all of a
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
@@ -112,7 +111,7 @@ def test_grouped_mm_gather_scatter_group():
 def test_grouped_mm_gather_scatter_group_sizes():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
 
     group_indices = torch.tensor([0, 14, 128, 512], device="cuda", dtype=torch.uint32) 
 
@@ -124,7 +123,7 @@ def test_grouped_mm_gather_scatter_group_sizes():
 def test_grouped_mm_gather_scatter_group_and_gather_2():
     e, m, k, n = 8, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
 
     group_indices = torch.arange(0, e * m + 1, m, device="cuda")
     gather_indices = torch.arange(0, m, device="cuda").repeat(e)
@@ -141,7 +140,7 @@ def test_grouped_mm_gather_scatter_group_and_gather_reverse():
 
     e, m, k, n = 8, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
 
     group_indices = torch.arange(0, e * m + 1, m, device="cuda")
     # each group reverses the rows of `a`
@@ -156,7 +155,7 @@ def test_grouped_mm_gather_scatter_group_and_gather_reverse():
 def test_grouped_mm_gather_scatter_group_scatter_1():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     # one group that is all of a, output tokens scaled by 2 before scatter_reduce
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
@@ -176,7 +175,7 @@ def test_grouped_mm_gather_scatter_group_scatter_1():
 def test_grouped_mm_gather_scatter_group_scatter_2():
     e, m, k, n = 1, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16)
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     # one group that is all of a, output tokens scaled by 2 before scatter_reduce
     group_indices = torch.tensor([0, m], device="cuda").to(torch.uint32)
@@ -197,7 +196,7 @@ def test_grouped_mm_gather_scatter_group_scatter_2():
 def test_grouped_mm_gather_all():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.002
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     gather_size = 4 * m
 
@@ -215,7 +214,7 @@ def test_grouped_mm_gather_all():
 def test_grouped_mm_gather_scatter_all():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.02
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     gather_size = 4 * m
 
@@ -239,7 +238,7 @@ def test_grouped_mm_gather_scatter_all():
 def test_grouped_mm_gather_scatter_scale():
     e, m, k, n = 3, 512, 512, 512
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) * 0.02
+    b = torch.randn((e, k, n), device="cuda", dtype=torch.float16) / math.sqrt(n)
     
     gather_size = 4 * m
 

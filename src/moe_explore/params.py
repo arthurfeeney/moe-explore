@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 import math
-from typing import Union, Callable
+from typing import Union, Callable, Optional
 import torch
 
 # We don't want individual modules for everything
-# because it's annoying to pass weight around.
-# Instead, everything is functional and things
+# because it's annoying to initialize weights for everything.
+# Instead, mostly using functional API and things
 # are organized in dataclasses.
 
 @dataclass
@@ -28,6 +28,14 @@ class MOEParams:
     expert_params: Union[MLPParams, GLUParams]
     num_experts: int
     topk: int
+
+@dataclass
+class ExpertMatmulParams:
+    tokens: torch.Tensor
+    weight: torch.Tensor
+    group_indices: torch.Tensor
+    token_to_group_indices: torch.Tensor
+    scales: Optional[torch.Tensor]
 
 def random_mlp(
     num_experts,

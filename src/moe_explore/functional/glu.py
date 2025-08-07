@@ -5,6 +5,7 @@ from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.triton_kernels.grouped_mm_gather_scatter import grouped_mm_gather_scatter
 from moe_explore.params import GLUParams, MOEParams
+from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
 
 import triton.profiler as proton
 
@@ -51,6 +52,7 @@ def moe_glu_grouped_gemm_fused(
     params: MOEParams,
     autotune_mode = None
 ):
+    num_tokens = input.size(0)
     ep: GLUParams = params.expert_params
     with proton.scope("router"):
         topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
@@ -58,37 +60,52 @@ def moe_glu_grouped_gemm_fused(
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
 
     with proton.scope("moe"):
-        gate = grouped_mm_gather_scatter(
-            input, 
-            ep.gate_weight, 
+        gate_params = FusedMoeParams(
+            ep.gate_weight,
             perm_to_group_indices.group_indices,
-            gather_indices=perm_to_group_indices.permute_indices,
+            perm_to_group_indices.indices,
+            gather=True,
+            scatter=False,
+            num_tokens=num_tokens,
+            topk=params.topk,
+            scales=None
+        )
+
+        gate = fused_moe(
+            input, 
+            gate_params,
             autotune_mode=autotune_mode
         )
         gate = ep.activation(gate)
 
-        up = grouped_mm_gather_scatter(
+        up_params = gate_params
+        up_params.weight = ep.up_weight
+
+        up = fused_moe(
             input, 
-            ep.up_weight, 
-            perm_to_group_indices.group_indices,
-            gather_indices=perm_to_group_indices.permute_indices,
+            up_params,
             autotune_mode=autotune_mode
         )
 
         gated = gate * up
 
-        down = grouped_mm_gather_scatter(
-            gated,
+        down_params = FusedMoeParams(
             ep.down_weight,
-            group_indices=perm_to_group_indices.group_indices,
-            gather_indices=None,
-            scatter_indices=perm_to_group_indices.permute_indices,
-            scales=topk_scores.view(-1),
-            scales_indices=perm_to_group_indices.indices.view(-1),
+            perm_to_group_indices.group_indices,
+            perm_to_group_indices.indices,
+            gather=False,
+            scatter=True,
+            num_tokens=num_tokens,
             topk=params.topk,
-            output_rows=input.size(0),
+            scales=topk_scores
+        )
+
+        down = fused_moe(
+            gated,
+            down_params,
             autotune_mode=autotune_mode
         )
+
     return down
 
 def moe_glu_grouped_gemm(

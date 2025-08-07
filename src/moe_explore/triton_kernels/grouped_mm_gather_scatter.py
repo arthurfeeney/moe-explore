@@ -27,6 +27,7 @@ def grouped_mm_gather_scatter_kernel(
     scales_ptr,
     scales_indices_ptr,
     ACC_DTYPE: tl.constexpr,
+    DTYPE: tl.constexpr,
     # E determines the number of problems.
     E: tl.constexpr,
     K: tl.constexpr,
@@ -46,7 +47,7 @@ def grouped_mm_gather_scatter_kernel(
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
 
-    for problem_id in range(0, E):
+    for problem_id in tl.range(0, E, flatten=True):
         end_idx = tl.load(group_indices_ptr + problem_id + 1)
         start_idx = tl.load(group_indices_ptr + problem_id)
         m = end_idx - start_idx
@@ -89,7 +90,7 @@ def grouped_mm_gather_scatter_kernel(
                 b_ptrs += BLOCK_K * N
  
             # TODO: cast before or after scaling?
-            acc = tl.cast(acc, tl.float16)
+            acc = tl.cast(acc, c_ptr.dtype.element_ty)
 
             c_col_offsets = tile_n_offsets
             if SCATTER_ROWS:
@@ -191,6 +192,7 @@ def grouped_mm_gather_scatter(
         scales,
         scales_indices,
         ACC_DTYPE=tl.float32,
+        DTYPE=c.dtype,
         E=e, 
         K=k, 
         N=n,
