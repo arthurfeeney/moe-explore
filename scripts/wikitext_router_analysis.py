@@ -79,7 +79,8 @@ def main():
         "expert_counts": expert_counts.detach().cpu(),
         "num_tokens": seq_len,
         "stride": stride,
-        "model_name": args.model_name
+        "model_name": args.model_name,
+        "dataset_name": "wikitext"
     }
     torch.save(to_save, f"wikitext_counts_{args.model_name}.pt")
 
