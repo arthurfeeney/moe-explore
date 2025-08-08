@@ -1,8 +1,3 @@
-r"""
-This hacks some hugging face models to get statistics
-on how tokens get routed for the wikitext dataset.
-"""
-
 import argparse
 from datasets import load_dataset, DatasetDict
 import matplotlib.pyplot as plt
