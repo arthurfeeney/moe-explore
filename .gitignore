@@ -3,6 +3,9 @@
 *.csv
 *.hatchet
 
+# pytorch torch.save outputs
+*.pt
+
 # chrome traces
 *.json
 
