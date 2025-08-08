@@ -1,4 +1,4 @@
-[build-system]
+
 requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
@@ -18,17 +18,34 @@ dependencies = [
   "torchvision>=0.22.0",
 ]
 
+[project.optional-dependencies]
+tests = [
+  "transformers",
+]
+bench = [
+  "transformers"
+]
+all = ["moe_explore[tests]", "moe_explore[bench]"]
+
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu126" },
+  # For developing on macos, need need cpu torch
+  { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux'" },
 ]
 torchvision = [
-  { index = "pytorch-cu126" },
+  { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux'" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.pytest.ini_options]
