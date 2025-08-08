@@ -41,7 +41,7 @@ def max_autotune_configs(persistent: bool):
     block_m = AutotuneParam("BLOCK_M", block_sizes)
     block_n = AutotuneParam("BLOCK_N", block_sizes)
     block_k = AutotuneParam("BLOCK_K", block_sizes)
-    num_warps = AutotuneParam("num_warps", [4, 8]) 
+    num_warps = AutotuneParam("num_warps", [4, 8])
     num_stages = AutotuneParam("num_stages", [3, 4])
     params = [block_m, block_n, block_k, num_warps, num_stages]
     if persistent:

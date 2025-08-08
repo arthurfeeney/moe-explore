@@ -3,9 +3,9 @@ import math
 import torch
 from triton.testing import perf_report, do_bench, Benchmark
 from moe_explore.functional.mlp import (
-        moe_mlp_torch,
-        moe_mlp_grouped_gemm_fused,
-        moe_mlp_grouped_gemm
+    moe_mlp_torch,
+    moe_mlp_grouped_gemm_fused,
+    moe_mlp_grouped_gemm
 )
 
 import sys
