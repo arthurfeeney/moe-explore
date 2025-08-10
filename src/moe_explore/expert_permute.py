@@ -6,13 +6,11 @@ from dataclasses import dataclass
 class GroupedTokens:
     tokens: torch.Tensor
     group_indices: torch.Tensor
-    permute_indices: torch.Tensor
     indices: torch.Tensor
 
 @dataclass
 class PermToGroupIndices:
     group_indices: torch.Tensor
-    permute_indices: torch.Tensor
     indices: torch.Tensor
 
 @torch.compile
@@ -33,10 +31,8 @@ def get_token_indices(
     else:
         group_indices = counts.cumsum(dim=0)
     
-    permute_indices = indices // topk
     return PermToGroupIndices(
         group_indices=group_indices,
-        permute_indices=permute_indices,
         indices=indices
     )
 
@@ -49,11 +45,10 @@ def expert_input_permute(
 ) -> GroupedTokens:
     indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=True)
     token_dim = tokens.size(1)
-    output = torch.gather(tokens, dim=0, index=indices.permute_indices.unsqueeze(1).expand(-1, token_dim))
+    output = torch.gather(tokens, dim=0, index=indices.indices.unsqueeze(1).expand(-1, token_dim) // topk)
     return GroupedTokens(
         tokens=output,
         group_indices=indices.group_indices,
-        permute_indices=indices.permute_indices,
         indices=indices.indices 
     )
 
@@ -61,6 +56,7 @@ def expert_input_permute(
 def expert_output_permute(
     grouped_tokens: GroupedTokens,
     expert_scores: torch.Tensor,
+    topk: int,
     output_shape: Union[Tuple[int], torch.Size]
 ) -> torch.Tensor:
     grouped_tokens.tokens.mul_(expert_scores.view(-1, 1)[grouped_tokens.indices])
@@ -68,7 +64,7 @@ def expert_output_permute(
     output.scatter_reduce_(
         0,
         # expand is used because scatter_reduce_ doesn't broadcast
-        grouped_tokens.permute_indices.view(-1, 1).expand(-1, output_shape[-1]),
+        grouped_tokens.indices.view(-1, 1).expand(-1, output_shape[-1]) // topk,
         grouped_tokens.tokens,
         reduce='sum'
     )

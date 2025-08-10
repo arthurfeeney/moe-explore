@@ -6,7 +6,6 @@ from torch.profiler import record_function
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
-from moe_explore.triton_kernels.grouped_mm_gather_scatter import grouped_mm_gather_scatter
 from moe_explore.params import MOEParams, MLPParams
 
 def moe_mlp_torch(
@@ -27,7 +26,7 @@ def moe_mlp_torch(
             start_idx = 0 if expert_id == 0 else perm_to_group_indices.group_indices[expert_id - 1]
             if start_idx == end_idx:
                 continue
-            exp_token_idxs = perm_to_group_indices.permute_indices[start_idx:end_idx]
+            exp_token_idxs = perm_to_group_indices.indices[start_idx:end_idx] // params.topk
             expert_tokens = input[exp_token_idxs]
             
             expert_out = expert_tokens @ ep.weight1[expert_id]
@@ -134,5 +133,5 @@ def moe_mlp_grouped_gemm(
     
     perm_to_group_indices.tokens = down
     
-    output = expert_output_permute(perm_to_group_indices, topk_scores, input.size())
+    output = expert_output_permute(perm_to_group_indices, topk_scores, params.topk, input.size())
     return output
