@@ -81,10 +81,7 @@ test_params = [
     Params('cuda', torch.float16, 128, 128, 256, num_experts=8, topk=2, activation=torch.nn.functional.gelu),
     Params('cuda', torch.float16, 256, 1024, 1024, 8, 2, torch.nn.functional.gelu),
     Params('cuda', torch.float16, 999, 2048, 2048, 8, 2, torch.nn.functional.gelu),
-    # As of triton 3.3.1, atomic_add does not supprot bfloat16,
-    # there isn't an instrction for it until sm90+.
-    # leaving commented as I believe it's supported in newer versions
-    # Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, torch.nn.functional.gelu),
+    Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, torch.nn.functional.gelu),
     Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, torch.nn.functional.gelu),
     Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, torch.nn.functional.gelu),
     Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, torch.nn.functional.gelu),

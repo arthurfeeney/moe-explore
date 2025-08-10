@@ -2,21 +2,48 @@ from functools import partial
 import math
 import torch
 from triton.testing import perf_report, do_bench, Benchmark
-from moe_explore.functional.mlp import (
-        moe_mlp_torch,
-        moe_mlp_grouped_gemm_fused,
-        moe_mlp_grouped_gemm
+from moe_explore.functional.glu import (
+        moe_glu_torch,
+        moe_glu_grouped_gemm_fused,
+        moe_glu_grouped_gemm
 )
+from moe_explore.params import random_glu, MOEParams
+from moe_explore.triton_kernels.autotune_config import AutotuneMode
+
 
 import sys
 sys.path.append("./")
 sys.path.append("bench/")
 sys.path.append("bench/external")
 
-from scattermoe.mlp import MLP as ScatterMoEMLP
-from external.scattermoe import scattermoe_forward
-from external.sglang_fused_moe import sglang_fused_moe
+try:
+    from scattermoe.mlp import MLP as ScatterMoEMLP
+    HAVE_SCATTERMOE = True
+except ImportError:
+    HAVE_SCATTERMOE = False
+#from external.scattermoe import scattermoe_forward
+#from external.sglang_fused_moe import sglang_fused_moe
+#except ImportError:
+#    print("ScatterMoE and SGLang not installed, skipping")
+#    pass
 
+def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
+    r""" This computes the flops of a GLU forward pass. Flops are counted separately,
+    so an FMA is counted as two flops.
+    """
+    router_flop_count = 2 * num_tokens * num_experts * input_dim
+    num_routed_tokens = num_tokens * act_experts
+    gate_flop_count = 2 * num_routed_tokens * input_dim * hidden_dim
+    up_flop_count = 2 * num_routed_tokens * input_dim * hidden_dim
+    # TODO: FLOPs for activation function is weird... How many flops is silu?
+    act_flop_count = 2 * num_routed_tokens * hidden_dim
+    down_flop_count = 2 * num_routed_tokens * hidden_dim * input_dim
+    
+    flop_count = router_flop_count + gate_flop_count + up_flop_count + act_flop_count + down_flop_count
+    tera_flop_count = flop_count * 1e-12 
+    flop_per_sec = tera_flop_count / (ms / 1000)
+    return flop_per_sec
+    
 def generate_inputs(
     device,
     dtype,
@@ -33,12 +60,17 @@ def generate_inputs(
     return (input, router_weight, expert_weights1, expert_weights2)
 
 def moe_benchmark(plot_name, num_experts, act_experts, seq_len, hidden_dim, input_dim, activation):
+    line_vals = ["torch", "grouped_gemm", "fused"]
+    line_names = ["Torch", "Grouped GEMM", "Fused"]
+    if HAVE_SCATTERMOE:
+        line_vals.append("scattermoe")
+        line_names.append("ScatterMoE")
     return Benchmark(
         x_names=["batch_size"],
-        x_vals=[1, 4],
+        x_vals=[1, 2, 4, 8, 16, 32, 64],
         line_arg="provider",
-        line_vals=["naive", "group_gemm", "fused", "scattermoe", "sglang"],
-        line_names=["Naive", "Group GEMM", "Fused", "ScatterMoE", "SGLang"],
+        line_vals=line_vals,
+        line_names=line_names,
         styles=[
             ("green", "-"), 
             ("blue", "-"), 
@@ -58,9 +90,6 @@ def moe_benchmark(plot_name, num_experts, act_experts, seq_len, hidden_dim, inpu
         })
 
 configs = []
-# TODO: Need SwiGLU variant...
-# TODO: this is too large for A30... damn lol
-"""
 configs.append(
         moe_benchmark(
             "Qwen3-30B-A3B, seq_len=64, 8/128 experts",
@@ -69,9 +98,8 @@ configs.append(
             seq_len=64,
             hidden_dim=768,
             input_dim=1024,
-            activation=torch.nn.functional.gelu
+            activation=torch.nn.functional.silu
         ))
-"""
 configs.append(
         moe_benchmark(
             "OLMoE-1B-7B, seq_len=64, 8/64 experts",
@@ -80,32 +108,8 @@ configs.append(
             seq_len=64,
             input_dim=512,
             hidden_dim=512,
-            activation=torch.nn.functional.gelu
+            activation=torch.nn.functional.silu
         ))
-
-def bench_moe_explore(
-    func,
-    input,
-    router_weight,
-    expert_weights1,
-    expert_weights2,
-    input_dim,
-    num_experts,
-    act_experts,
-    activation
-):
-    with torch.no_grad():
-        quantiles = [0.5, 0.2, 0.8]
-        ms, min_ms, max_ms = do_bench(lambda: func(
-            input,
-            router_weight,
-            expert_weights1,
-            expert_weights2,
-            input_dim,
-            num_experts,
-            act_experts,
-            activation), quantiles=quantiles)
-        return ms, min_ms, max_ms
 
 @perf_report(configs)
 def benchmark_moe_forward(
@@ -118,29 +122,33 @@ def benchmark_moe_forward(
     batch_size, 
     provider
 ):
-    input, router_weight, expert_weights1, expert_weights2 = generate_inputs(
-            "cuda", torch.float16, batch_size, seq_len, input_dim, hidden_dim, num_experts)
-    
-    moe_explore_options = ("naive", "group_gemm", "fused")
-    if provider in moe_explore_options: 
-        if provider == "naive":
-            func = moe_mlp_torch
-        elif provider == "group_gemm":
-            func = moe_mlp_grouped_gemm
-        elif provider == "fused":
-            func = moe_mlp_grouped_gemm_fused
-        ms, min_ms, max_ms = bench_moe_explore(
-            func, 
-            input,
-            router_weight,
-            expert_weights1,
-            expert_weights2,
-            input_dim,
-            num_experts,
-            act_experts,
-            activation
-        )
+    glu_params = random_glu(
+        num_experts=num_experts,
+        hidden_dim=input_dim,
+        intermediate_dim=hidden_dim,
+        activation=activation,
+        device="cuda",
+        dtype=torch.bfloat16
+    )
+    moe_params = MOEParams(
+        expert_params=glu_params,
+        num_experts=num_experts,
+        topk=act_experts
+    )
+    input = torch.randn((batch_size * seq_len, input_dim), device=torch.device("cuda"), dtype=torch.bfloat16)
 
+    quantiles = [0.5, 0.2, 0.8]
+    autotune_mode = AutotuneMode.FAST
+    if provider == "torch":
+        ms, min_ms, max_ms = do_bench(lambda: moe_glu_torch(input, moe_params, autotune_mode), quantiles=quantiles)
+    elif provider == "grouped_gemm":
+        ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm(input, moe_params, autotune_mode), quantiles=quantiles)
+    elif provider == "fused":
+        ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm_fused(input, moe_params, autotune_mode), quantiles=quantiles)
+
+    tflops_per_sec = glu_tflops(batch_size * seq_len, num_experts, input_dim, hidden_dim, act_experts, ms)
+    return tflops_per_sec#, ms, min_ms, max_ms
+    """
     elif provider == "scattermoe":
         # scatter moe is using a different set of randomly initialized weights,
         # but this should be computing effectively the same thing as moe explore
@@ -149,7 +157,9 @@ def benchmark_moe_forward(
         ms, min_ms, max_ms = do_bench(
                 lambda: scattermoe_forward(input, router_weight, mlp, act_experts),
                 quantiles=[0.5, 0.2, 0.8])
+    """
 
+    """
     elif provider == "sglang":
         quantiles=[0.5, 0.2, 0.8]
         ms, min_ms, max_ms = do_bench(lambda: sglang_fused_moe(
@@ -160,9 +170,7 @@ def benchmark_moe_forward(
             act_experts,
             activation="gelu"
         ), quantiles=quantiles)
-
-    else:
-        print(f"provider {provider} invalid")
+    """
 
     return ms, min_ms, max_ms
 
