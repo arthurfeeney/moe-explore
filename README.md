@@ -29,6 +29,7 @@ BUT, the speedup should be immediately obvious and very large.
 uv venv $TMPDIR/moe-explore
 source $TMPDIR/moe-explore/bin/activate
 uv sync --no-cache --active --all-extras
+pip install -e .
 ```
 
 ## Performance Comparisons

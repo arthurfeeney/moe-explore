@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+@torch.compile
 def softmax(x):
     return nn.functional.softmax(x, dim=-1, dtype=torch.float32)
     

@@ -3,7 +3,6 @@ from torch.profiler import record_function
 
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
-from moe_explore.triton_kernels.grouped_mm_gather_scatter import grouped_mm_gather_scatter
 from moe_explore.params import GLUParams, MOEParams
 from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
 
@@ -117,29 +116,56 @@ def moe_glu_grouped_gemm(
     with proton.scope("router"):
         topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
     with proton.scope("input_permute"):
-        group_token = expert_input_permute(input, topk_indices, num_experts=params.num_experts, topk=params.topk)
-    
+        perm_to_group_indices = expert_input_permute(input, topk_indices, num_experts=params.num_experts, topk=params.topk)
+        
+    num_tokens = input.size(0) * params.topk
+        
     with proton.scope("moe"):
-        gate = grouped_mm_gather_scatter(
-                group_token.tokens, 
-                ep.gate_weight, 
-                group_token.group_indices,
-                autotune_mode=autotune_mode
+        gate_params = FusedMoeParams(
+            ep.gate_weight,
+            perm_to_group_indices.group_indices,
+            permute_indices=None,
+            gather=False,
+            scatter=False,
+            num_tokens=num_tokens,
+            topk=params.topk,
+            scales=None
+        )
+        gate = fused_moe(
+            perm_to_group_indices.tokens, 
+            gate_params,
+            autotune_mode=autotune_mode
         )
         gate = ep.activation(gate)
-        up = grouped_mm_gather_scatter(
-                group_token.tokens, 
-                ep.up_weight, 
-                group_token.group_indices,
-                autotune_mode=autotune_mode
+
+        up_params = gate_params
+        up_params.weight = ep.up_weight 
+        up = fused_moe(
+            perm_to_group_indices.tokens, 
+            up_params,
+            autotune_mode=autotune_mode
         )
-        gated = up * gate
-        group_token.tokens = grouped_mm_gather_scatter(
-                gated, 
-                ep.down_weight, 
-                group_token.group_indices,
-                autotune_mode=autotune_mode
+
+        gated = gate * up
+
+        down_params = FusedMoeParams(
+            ep.down_weight,
+            perm_to_group_indices.group_indices,
+            None,
+            gather=False,
+            scatter=False,
+            num_tokens=num_tokens,
+            topk=params.topk,
+            scales=None
         )
+        down = fused_moe(
+            gated,
+            down_params,
+            autotune_mode=autotune_mode
+        )
+        
+        perm_to_group_indices.tokens = down
+        
     with proton.scope("output_permute"):
-        output = expert_output_permute(group_token, topk_scores, input.size())
+        output = expert_output_permute(perm_to_group_indices, topk_scores, input.size())
     return output

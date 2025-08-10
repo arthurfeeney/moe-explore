@@ -4,165 +4,145 @@ from moe_explore.triton_kernels.fused_moe import (
     fused_moe,
     FusedMoeParams
 )
-from moe_explore.expert_permute import expert_input_permute, expert_output_permute
-from moe_explore.triton_kernels.grouped_mm_gather_scatter import get_output_rows
+from moe_explore.expert_permute import get_token_indices
+from moe_explore.test_utils import torch_grouped_matmul_gather_scatter, random_routing, random_groups
+import pytest
 
-"""
-def naive_fused_moe(
-    a, 
-    b,
-    group_indices, 
-    permute_indices,
-    gather,
-    scatter,
-    num_tokens,
-    topk,
-    scales, 
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,K,N,dtype", 
+    [
+        (10, 4, 128, 128, torch.bfloat16),
+        (200, 4, 512, 512, torch.bfloat16),
+        (200, 4, 512, 512, torch.float16),
+    ]
+)
+def test_fused_moe(
+    num_tokens: int,
+    num_experts: int,
+    K: int, 
+    N: int,
+    dtype: torch.dtype
 ):
-    if gather or scatter:
-        out_rows = num_tokens * topk
-    else:
-        out_rows = num_tokens
-
-    out = torch.zeros((num_tokens * topk, b.size(-1)), device=a.device, dtype=a.dtype)
-
-    for i in range(b.size(0)):
-        glo, ghi = group_indices[i].item(), group_indices[i + 1].item()
-        if gather:
-            index = permute_indices[glo:ghi].unsqueeze(-1).expand(-1, a.size(-1)) // topk
-            a_gather = torch.gather(a, dim=0, index=index)
-        else:
-            a_gather = a[glo:ghi]
-        prod = a_gather @ b[i]
-        #if scatter:
-        #    index = permute_indices[glo:ghi]
-        #    out[glo:ghi] = prod[index]
-        #else:
-        out[glo:ghi] = prod
-
-
-    if scatter:
-        out_size = (num_tokens, b.size(-1))
-        out.mul_(scales.view(-1, 1)[permute_indices])
-        output = torch.zeros(out_size, 
-                             dtype=a.dtype,
-                             device=a.device)
-        output.scatter_reduce_(
-            0,
-            # expand is used because scatter_reduce_ doesn't broadcast
-            permute_indices.view(-1, 1).expand(-1, out_size[-1]) // topk,
-            out,
-            reduce='sum'
-        )
-        return output
-
-    return out
-"""
-
-def naive_grouped_mm_gather_scatter(
-    a, 
-    b,
-    group_indices, 
-    gather_indices=None,
-    scatter_indices=None, 
-    scales=None, 
-    scales_indices=None,
-    topk=None,
-    output_rows=None
-):
-    c_rows = get_output_rows(a.size(0), gather_indices, scatter_indices, output_rows)
-    c = torch.zeros(c_rows, b.size(-1), device=a.device, dtype=a.dtype)
-
-    for i in range(b.size(0)):
-        glo, ghi = group_indices[i].item(), group_indices[i + 1].item()
-        if gather_indices is not None:
-            index = gather_indices[glo:ghi].unsqueeze(-1).expand(-1, a.size(-1))
-            a_gather = torch.gather(a, dim=0, index=index)
-        else:
-            a_gather = a[glo:ghi]
-        prod = a_gather @ b[i]
-        if scatter_indices is not None:
-            if scales is not None:
-                index = scales_indices[glo:ghi]
-                print(index.size(), scales.size(), prod.size())
-                prod *= scales[index][:, None]
-            index = scatter_indices[glo:ghi].unsqueeze(-1).expand(-1, prod.size(-1))
-            c.scatter_reduce_(
-                    0,
-                    index, 
-                    prod, 
-                    "sum")
-        else:
-            c[glo:ghi] = prod
-    return c
-
-
-def test_fused_moe():
-    num_tokens = 10
-    num_experts = 2
-    K = 128
-    N = 128
-    topk = 1
-    weight = torch.randn((num_experts, K, N), dtype=torch.bfloat16, device="cuda") / math.sqrt(N)
-    group_indices = torch.tensor([0, 4, num_tokens + 1], dtype=torch.int, device="cuda")
-    permute_indices = None
-    scales = torch.ones((num_tokens, topk), dtype=torch.bfloat16, device="cuda")
+    r"""
+    This is essentially testing a M-grouped gemm. 
+    It is not really testing part of an MoE, since it does no routing.
+    If one had a hypothetical three-layer MLP, something like this could be the middle layer.
+    """
+    assert torch.cuda.is_available()
+    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    group_indices = random_groups(num_tokens, num_experts, device="cuda")
+        
     params = FusedMoeParams(
         weight,
         group_indices,
-        permute_indices,
+        None,
         False,
         False,
         num_tokens,
-        topk,
-        scales
+        1,
+        None
     )
-
-    input = torch.randn((num_tokens, K), dtype=torch.bfloat16, device="cuda")
-    out = fused_moe(input, params)
-
-    assert out.isfinite().all()
-
-def random_router(num_tokens, num_experts, topk):
-    scores = torch.randn((num_tokens, num_experts), dtype=torch.bfloat16, device="cuda")
-    topk_scores, topk_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)
-    return topk_scores, topk_indices
-
-def test_fused_moe2():
-    num_tokens = 20
-    num_experts = 4
-    K = 128
-    N = 128
-    topk = 1
-    weight = torch.randn((num_experts, K, N), dtype=torch.bfloat16, device="cuda") / math.sqrt(N)
-    group_indices = torch.tensor([0, 4, 10, 15, num_tokens], dtype=torch.int, device="cuda")
     
-    _, topk_indices = random_router(num_tokens, num_experts, topk)
-    permute_indices = topk_indices.view(-1).argsort()
-    scales = torch.rand((num_tokens, topk), dtype=torch.bfloat16, device="cuda")
+    out = fused_moe(input, params)
+    ref = torch_grouped_matmul_gather_scatter(input, params)
+    
+    assert out.isfinite().all() and ref.isfinite().all()
+    torch.testing.assert_close(out, ref)
+    
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,topk,K,N,dtype", 
+    [
+        (10, 4, 2, 128, 128, torch.bfloat16),
+        (2000, 32, 4, 512, 512, torch.bfloat16),
+        (2000, 32, 4, 512, 512, torch.float16),
+    ]
+)
+def test_fused_moe_gather(
+    num_tokens: int,
+    num_experts: int,
+    topk: int, 
+    K: int, 
+    N: int,
+    dtype: torch.dtype
+):
+    assert torch.cuda.is_available()
+    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    p = get_token_indices(
+        topk_indices.view(-1),
+        topk,
+        num_experts,
+        zero_prefix=True
+    )   
+
     params = FusedMoeParams(
         weight,
-        group_indices,
-        permute_indices,
+        p.group_indices,
+        p.indices,
+        True,
+        False,
+        num_tokens,
+        topk,
+        None
+    )
+    
+    out = fused_moe(input, params)
+    ref = torch_grouped_matmul_gather_scatter(input, params)
+    
+    assert out.isfinite().all() and ref.isfinite().all()
+    torch.testing.assert_close(out, ref)
+
+@pytest.mark.parametrize(
+    "num_tokens_times_topk,num_experts,topk,K,N,dtype", 
+    [
+        (20, 4, 2, 128, 128, torch.bfloat16),
+        (2000, 32, 4, 512, 512, torch.bfloat16),
+        (2000, 32, 4, 512, 512, torch.float16),
+
+    ]
+)
+def test_fused_moe_scatter(
+    num_tokens_times_topk: int,
+    num_experts: int,
+    topk: int, 
+    K: int, 
+    N: int,
+    dtype: torch.dtype
+):
+    assert torch.cuda.is_available()
+    input = torch.randn((num_tokens_times_topk, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    
+    # this test is setup to implicitly assume that we have already routed `num_tokens`
+    # to `num_tokens * topk`. The routing and scales are generated using the original
+    # `num_tokens`, because it ends up reducing after the scales.
+    num_tokens = num_tokens_times_topk // topk
+    _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    p = get_token_indices(
+        topk_indices.view(-1),
+        topk,
+        num_experts,
+        zero_prefix=True
+    )   
+    scales = torch.randn((num_tokens, topk), dtype=dtype, device="cuda")
+
+    params = FusedMoeParams(
+        weight,
+        p.group_indices,
+        p.indices,
         False,
         True,
         num_tokens,
         topk,
         scales
     )
-
-    input = torch.randn((num_tokens, K), dtype=torch.bfloat16, device="cuda")
+    
     out = fused_moe(input, params)
-    ref = naive_grouped_mm_gather_scatter(
-        input,
-        params.weight,
-        params.group_indices,
-        None,
-        scatter_indices=params.permute_indices,
-        topk=topk,
-        scales_indices=permute_indices,
-        scales=scales.view(-1)
-    )
-
-    assert out.isfinite().all()
-    torch.testing.assert_close(out, ref)
+    ref = torch_grouped_matmul_gather_scatter(input, params).to(dtype)
+    
+    assert out.isfinite().all() and ref.isfinite().all()
+    # These tolerances are a little loser. The final reduciton over the topk outputs 
+    # seems to make the accuracy a little worse than a normal matmul.
+    torch.testing.assert_close(out, ref, atol=1e-1, rtol=1e-3)

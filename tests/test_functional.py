@@ -85,7 +85,9 @@ test_params = [
     # there isn't an instrction for it until sm90+.
     # leaving commented as I believe it's supported in newer versions
     # Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, torch.nn.functional.gelu),
-    Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, torch.nn.functional.gelu)
+    Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, torch.nn.functional.gelu),
+    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, torch.nn.functional.gelu),
+    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, torch.nn.functional.gelu),
 ]
 
 @pytest.mark.parametrize("params", test_params)
@@ -101,6 +103,7 @@ def test_moe_mlp_torch(
     )
 
     assert output.size() == input.size()
+    assert torch.isfinite(output).all()
 
 @pytest.mark.parametrize("params", test_params)
 def test_moe_mlp_grouped_gemm(

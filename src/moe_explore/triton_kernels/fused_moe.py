@@ -22,7 +22,7 @@ class FusedMoeParams:
     scales: Optional[torch.Tensor]
 
 @triton.jit
-def fused_moe1_kernel(
+def m_grouped_persistent_kernel(
     token_ptr,
     token_strides,
     weight_ptr,
@@ -32,8 +32,6 @@ def fused_moe1_kernel(
     group_indices_ptr,
     permute_indices_ptr,
     ACC_DTYPE: tl.constexpr,
-    DTYPE: tl.constexpr,
-    num_tokens,
     E: tl.constexpr,
     K: tl.constexpr,
     N: tl.constexpr,
@@ -110,17 +108,17 @@ def fused_moe1_kernel(
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
 
-_fast_autotune_fused_moe1_kernel = triton.autotune(
+_fast_autotune_m_grouped_persistent_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
     key=['E', 'N', 'K'],
     reset_to_zero=['out_ptr']
-)(fused_moe1_kernel)
+)(m_grouped_persistent_kernel)
 
-_max_autotune_fused_moe1_kernel = triton.autotune(
+_max_autotune_m_grouped_persistent_kernel = triton.autotune(
     configs=max_autotune_configs(persistent=True),
     key=['E', 'N', 'K'],
     reset_to_zero=['out_ptr']
-)(fused_moe1_kernel)
+)(m_grouped_persistent_kernel)
 
 def get_output_rows(num_tokens: int, topk: int, gather: bool, scatter: bool):
     if gather and not scatter:
@@ -146,11 +144,11 @@ def fused_moe(
     default_kwargs = {}
     if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
         default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_PROGRAMS": get_gpu_sm_count()}
-        func = fused_moe1_kernel
+        func = m_grouped_persistent_kernel
     elif autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_fused_moe1_kernel
+        func = _fast_autotune_m_grouped_persistent_kernel
     elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_fused_moe1_kernel
+        func = _max_autotune_m_grouped_persistent_kernel
 
     if params.gather or params.scatter:
         c_rows = num_tokens * params.topk
@@ -169,8 +167,6 @@ def fused_moe(
         params.group_indices, 
         params.permute_indices, 
         ACC_DTYPE=tl.float32,
-        DTYPE=out.dtype,
-        num_tokens=num_tokens,
         E=e, 
         K=k,
         N=n,
@@ -180,7 +176,7 @@ def fused_moe(
         **default_kwargs
     )
 
-    if params.scales is not None:
+    if params.scales is not None and params.scatter:
         out = (out.view(num_tokens, params.topk, n) * params.scales[..., None]).sum(1)
 
     return out

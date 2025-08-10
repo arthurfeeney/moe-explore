@@ -3,11 +3,6 @@ import math
 from typing import Union, Callable, Optional
 import torch
 
-# We don't want individual modules for everything
-# because it's annoying to initialize weights for everything.
-# Instead, mostly using functional API and things
-# are organized in dataclasses.
-
 @dataclass
 class MLPParams:
     router_weight: torch.Tensor
