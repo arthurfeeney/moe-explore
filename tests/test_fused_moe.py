@@ -100,7 +100,6 @@ def test_fused_moe_gather(
         (20, 4, 2, 128, 128, torch.bfloat16),
         (2000, 32, 4, 512, 512, torch.bfloat16),
         (2000, 32, 4, 512, 512, torch.float16),
-
     ]
 )
 def test_fused_moe_scatter(
@@ -119,30 +118,31 @@ def test_fused_moe_scatter(
     # to `num_tokens * topk`. The routing and scales are generated using the original
     # `num_tokens`, because it ends up reducing after the scales.
     num_tokens = num_tokens_times_topk // topk
-    _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    topk_scores, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
     p = get_token_indices(
         topk_indices.view(-1),
         topk,
         num_experts,
         zero_prefix=True
     )   
-    scales = torch.randn((num_tokens, topk), dtype=dtype, device="cuda")
 
     params = FusedMoeParams(
         weight,
         p.group_indices,
         p.indices,
-        False,
+        False,  
         True,
         num_tokens,
         topk,
-        scales
+        topk_scores
     )
+    
+    print(topk_scores.mean(), topk_scores.std(), topk_scores.max())
     
     out = fused_moe(input, params)
     ref = torch_grouped_matmul_gather_scatter(input, params).to(dtype)
-    
+        
     assert out.isfinite().all() and ref.isfinite().all()
-    # These tolerances are a little loser. The final reduciton over the topk outputs 
-    # seems to make the accuracy a little worse than a normal matmul.
-    torch.testing.assert_close(out, ref, atol=1e-1, rtol=1e-3)
+    # TODO: This atol is quite loose. default is 1e-5.
+    rtol = 1.6e-2 if dtype is torch.bfloat16 else 1e-3
+    torch.testing.assert_close(out, ref, atol=1e-3, rtol=rtol)

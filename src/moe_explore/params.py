@@ -31,36 +31,3 @@ class ExpertMatmulParams:
     group_indices: torch.Tensor
     token_to_group_indices: torch.Tensor
     scales: Optional[torch.Tensor]
-
-def random_mlp(
-    num_experts,
-    hidden_dim,
-    intermediate_dim,
-    activation,
-    device,
-    dtype,
-    dist=torch.randn,
-):
-    return MLPParams(
-        dist((hidden_dim, num_experts), device=device, dtype=dtype) / math.sqrt(num_experts),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype) / math.sqrt(intermediate_dim),
-        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim),
-        activation
-    )
-
-def random_glu(
-    num_experts,
-    hidden_dim,
-    intermediate_dim,
-    activation,
-    device,
-    dtype,
-    dist=torch.randn,
-):
-    return GLUParams(
-        dist((hidden_dim, num_experts), device=device, dtype=dtype) / math.sqrt(num_experts),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype) / math.sqrt(intermediate_dim),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype) / math.sqrt(intermediate_dim),
-        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim),
-        activation
-    )

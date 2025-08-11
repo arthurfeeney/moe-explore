@@ -22,7 +22,7 @@ class FusedMoeParams:
     scales: Optional[torch.Tensor]
 
 @triton.jit
-def m_grouped_persistent_kernel(
+def m_grouped_gemm_persistent_kernel(
     token_ptr,
     token_strides,
     weight_ptr,
@@ -108,17 +108,17 @@ def m_grouped_persistent_kernel(
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
 
-_fast_autotune_m_grouped_persistent_kernel = triton.autotune(
+_fast_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
     key=['E', 'N', 'K'],
     reset_to_zero=['out_ptr']
-)(m_grouped_persistent_kernel)
+)(m_grouped_gemm_persistent_kernel)
 
-_max_autotune_m_grouped_persistent_kernel = triton.autotune(
+_max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     configs=max_autotune_configs(persistent=True),
     key=['E', 'N', 'K'],
     reset_to_zero=['out_ptr']
-)(m_grouped_persistent_kernel)
+)(m_grouped_gemm_persistent_kernel)
 
 def get_output_rows(num_tokens: int, topk: int, gather: bool, scatter: bool):
     if gather and not scatter:
@@ -144,11 +144,11 @@ def fused_moe(
     default_kwargs = {}
     if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
         default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_PROGRAMS": get_gpu_sm_count()}
-        func = m_grouped_persistent_kernel
+        func = m_grouped_gemm_persistent_kernel
     elif autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_m_grouped_persistent_kernel
+        func = _fast_autotune_m_grouped_gemm_persistent_kernel
     elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_m_grouped_persistent_kernel
+        func = _max_autotune_m_grouped_gemm_persistent_kernel
 
     if params.gather or params.scatter:
         c_rows = num_tokens * params.topk
