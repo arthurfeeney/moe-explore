@@ -5,7 +5,7 @@ from moe_explore.triton_kernels.fused_moe import (
     FusedMoeParams
 )
 from moe_explore.expert_permute import get_token_indices
-from moe_explore.test_utils import torch_grouped_matmul_gather_scatter, random_routing, random_groups
+from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups
 import pytest
 
 @pytest.mark.parametrize(
@@ -136,9 +136,7 @@ def test_fused_moe_scatter(
         topk,
         topk_scores
     )
-    
-    print(topk_scores.mean(), topk_scores.std(), topk_scores.max())
-    
+
     out = fused_moe(input, params)
     ref = torch_grouped_matmul_gather_scatter(input, params).to(dtype)
         

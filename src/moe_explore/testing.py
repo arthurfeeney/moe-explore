@@ -49,6 +49,8 @@ def random_routing(num_tokens: int, num_experts: int, topk: int, device: torch.d
     This generates a random routing with the routing logies selected from a normal distribution.
     This tends to generate a very balanced routing.
     """
+    # Generate random scores. Applying softmax, even though it's nonsense numbers,
+    # so the distribution looks like a normal MoE router output.
     scores = F.softmax(torch.randn((num_tokens, num_experts), device=device, dtype=torch.float32), dim=-1)
     topk_logits, topk_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)
     return topk_logits.to(dtype), topk_indices
@@ -64,18 +66,21 @@ def random_skewed_routing(
 ):
     r"""
     This generates a random routing based on a sort of simple skewed distribution.
-    This makes it so that a subset of `num_skewed_experts` experts are `skew_factor` times
-    more likely to be routed to than the rest.
+    This makes it so that a subset of `num_skewed_experts` experts have a higher probability
+    of being routed to than the rest. 
+    The probabilities are determined by:
+        A = [skew_factor if is_skewed(expert_id) else 1 for expert_id in range(num_experts)]
+        Probs = A / sum(A).
+    I.e., if we have four experts, and two are skewed, and skew_factor is 2, then the probabilities
+    are [1, 1, 2, 2] / 6
     """
     skewed_experts_indices = torch.randperm(num_experts)[:num_skewed_experts]
-    probabilities = torch.ones(num_experts, device=device, dtype=torch.float32)
-    probabilities[skewed_experts_indices] *= skew_factor
-    topk_indices = torch.multinomial(probabilities, num_samples=topk, replacement=False)
-    # Generate random scores. Applying softmax, even though it's nonsense numbers,
-    # so the distribution looks like a normal MoE router output.
-    topk_logits = torch.randn((num_tokens, num_experts), device=device, dtype=torch.float32)
-    topk_scores = F.softmax(topk_logits, dim=-1)
-    return topk_scores.to(dtype), topk_indices
+    weights = torch.ones(num_tokens, num_experts, device=device, dtype=torch.float32)
+    weights[:, skewed_experts_indices] *= skew_factor
+    topk_indices = torch.multinomial(weights, num_samples=topk, replacement=False)
+    # The scores don't need to be from the same distribution as the indices.
+    topk_scores, _ = random_routing(num_tokens, num_experts, topk, device, dtype)
+    return topk_scores, topk_indices
 
 def random_groups(num_tokens, num_groups, device: torch.device):
     r"""

@@ -15,7 +15,8 @@ from moe_explore.functional.glu import (
     moe_glu_grouped_gemm_fused,
     moe_glu_grouped_gemm
 )
-from moe_explore.params import MOEParams, random_glu, random_mlp
+from moe_explore.params import MOEParams
+from moe_explore.testing import random_glu, random_mlp
 from moe_explore.hf_moe_reference import qwen3_moe_forward, olmoe_forward
 
 @dataclass
