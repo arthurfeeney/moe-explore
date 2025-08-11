@@ -7,7 +7,7 @@ from moe_explore.functional.glu import (
         moe_glu_grouped_gemm_fused,
         moe_glu_grouped_gemm
 )
-from moe_explore.test_utils import random_glu, MOEParams
+from moe_explore.testing import random_glu, MOEParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 
 import sys
@@ -79,8 +79,8 @@ configs.append(
             num_experts=128,
             act_experts=8,
             seq_len=64,
+            input_dim=2048,
             hidden_dim=768,
-            input_dim=1024,
             activation=torch.nn.functional.silu
         ))
 configs.append(
@@ -89,8 +89,8 @@ configs.append(
             num_experts=64,
             act_experts=8,
             seq_len=64,
-            input_dim=512,
-            hidden_dim=512,
+            input_dim=2048,
+            hidden_dim=1024,
             activation=torch.nn.functional.silu
         ))
 
@@ -129,7 +129,6 @@ def benchmark_moe_forward(
     elif provider == "fused":
         ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm_fused(input, moe_params, autotune_mode), quantiles=quantiles)
 
-    #tflops_per_sec = glu_tflops(batch_size * seq_len, num_experts, input_dim, hidden_dim, act_experts, ms)
     return ms, min_ms, max_ms
 
 benchmark_moe_forward.run(print_data=True)
