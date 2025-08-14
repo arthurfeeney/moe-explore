@@ -124,7 +124,7 @@ def test_fused_moe_scatter(
         topk,
         num_experts,
         zero_prefix=True
-    )   
+    )
 
     params = FusedMoeParams(
         weight,

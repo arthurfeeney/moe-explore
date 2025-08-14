@@ -75,12 +75,89 @@ def random_skewed_routing(
     are [1, 1, 2, 2] / 6
     """
     skewed_experts_indices = torch.randperm(num_experts)[:num_skewed_experts]
-    weights = torch.ones(num_tokens, num_experts, device=device, dtype=torch.float32)
+    weights = torch.ones((num_tokens, num_experts), device=device, dtype=torch.float32)
     weights[:, skewed_experts_indices] *= skew_factor
     topk_indices = torch.multinomial(weights, num_samples=topk, replacement=False)
-    # The scores don't need to be from the same distribution as the indices.
     topk_scores, _ = random_routing(num_tokens, num_experts, topk, device, dtype)
     return topk_scores, topk_indices
+
+def random_olmoe_routing(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    device: torch.device, 
+    dtype: torch.dtype
+):
+    probabilities = torch.tensor([
+        18.016000747680664,
+        16.97599983215332,
+        12.5,
+        10.182000160217285,
+        7.372000217437744,
+        15.965999603271484,
+        9.168000221252441,
+        11.65999984741211,
+        15.418000221252441,
+        17.45800018310547,
+        10.972000122070312,
+        12.994000434875488,
+        9.003999710083008,
+        17.926000595092773,
+        13.156000137329102,
+        10.016000747680664,
+        8.604000091552734,
+        21.036001205444336,
+        8.51200008392334,
+        3.9600000381469727,
+        2.615999937057495,
+        6.663999557495117,
+        8.369999885559082,
+        16.756000518798828,
+        18.18600082397461,
+        2.8480000495910645,
+        7.323999881744385,
+        8.522000312805176,
+        9.532000541687012,
+        8.64799976348877,
+        12.092000007629395,
+        24.61400032043457,
+        15.369998931884766,
+        7.921999931335449,
+        13.118000030517578,
+        2.748000144958496,
+        16.31399917602539,
+        19.992000579833984,
+        9.77400016784668,
+        13.29800033569336,
+        37.53199768066406,
+        16.26799964904785,
+        7.850000381469727,
+        12.163999557495117,
+        18.804000854492188,
+        10.760000228881836,
+        7.861999988555908,
+        19.14000129699707,
+        6.973999977111816,
+        13.957999229431152,
+        9.121999740600586,
+        8.742000579833984,
+        12.018000602722168,
+        16.918001174926758,
+        26.756000518798828,
+        8.795999526977539,
+        4.7260003089904785,
+        16.59600067138672,
+        7.269999980926514,
+        11.458000183105469,
+        9.90999984741211,
+        6.0980000495910645,
+        26.756000518798828,
+        8.685999870300293,
+    ], device=device, dtype=torch.float32) / 100.0
+    topk_indices = torch.multinomial(probabilities.repeat(num_tokens, 1), num_samples=topk, replacement=False)
+    topk_scores, _ = random_routing(num_tokens, num_experts, topk, device, dtype)
+    return topk_scores, topk_indices
+
 
 def random_groups(num_tokens, num_groups, device: torch.device):
     r"""
