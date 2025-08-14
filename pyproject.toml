@@ -1,4 +1,3 @@
-
 requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
@@ -9,11 +8,13 @@ description = "Playing around with some MoE Implementations"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "pytest",
-  "numpy",
-  "matplotlib>=3.10.3",
-  "pandas>=2.3.0",
   "imgcat>=0.6.0",
+  "matplotlib>=3.10.3",
+  "numpy",
+  "nvidia-cutlass-dsl==4.1.0",
+  "pandas>=2.3.0",
+  "pytest",
+  "seaborn",
   "triton==3.3.1", # depends on torch version
   "torch==2.7.1", # fixed version for sglang
   "torchvision>=0.22.0",
@@ -28,11 +29,16 @@ bench = [
   # transformers and some inference engines are used for performance comparisons.
   "transformers"
 ]
-all = ["moe_explore[tests]", "moe_explore[bench]"]
+scripts = [
+  "accelerate",
+  "datasets",
+  "transformers",
+]
+all = ["moe_explore[tests]", "moe_explore[bench]", "moe_explore[scripts]"]
 
 [tool.uv.sources]
 torch = [
-  # For developing on macos, need need cpu torch
+  # For developing on macos, need cpu torch
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
   { index = "pytorch-cu126", marker = "sys_platform == 'linux'" },
 ]
