@@ -138,7 +138,10 @@ def test_fused_moe_scatter(
     )
 
     out = fused_moe(input, params)
-    ref = torch_grouped_matmul_gather_scatter(input, params).to(dtype)
+    ref = torch_grouped_matmul_gather_scatter(input, params)
+    
+    print(out)
+    print(ref)
         
     assert out.isfinite().all() and ref.isfinite().all()
     # TODO: This atol is quite loose. default is 1e-5.

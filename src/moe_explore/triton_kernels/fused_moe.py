@@ -80,6 +80,9 @@ def m_grouped_gemm_persistent_kernel(
             tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
             tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
             tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
+            
+            if MASK_N:
+                n_mask = tile_n_offsets < N
 
             if GATHER_ROWS or SCATTER_ROWS:
                 permute_indices_offsets = start_idx + tile_m_offsets
@@ -91,15 +94,19 @@ def m_grouped_gemm_persistent_kernel(
             if GATHER_ROWS:
                 token_indices = permute_token_indices // TOPK
             else:
-                token_mask = start_idx + tile_m_offsets < end_idx
                 token_indices = start_idx + tile_m_offsets
 
+            if not (GATHER_ROWS or SCATTER_ROWS):
+                token_mask = start_idx + tile_m_offsets < end_idx
+
+            k_offset = tl.arange(0, BLOCK_K)
+
             token_row_offsets = token_indices * token_strides[0]
-            token_col_offsets = tl.arange(0, BLOCK_K) * token_strides[1]
+            token_col_offsets = k_offset * token_strides[1]
             token_ptrs = token_ptr + token_row_offsets[:, None] + token_col_offsets
 
             weight_problem_offset = problem_id * weight_strides[0]
-            weight_row_offsets = tl.arange(0, BLOCK_K)[:, None] * weight_strides[1]
+            weight_row_offsets = k_offset[:, None] * weight_strides[1]
             weight_col_offsets = tile_n_offsets * weight_strides[2]
             weight_ptrs = weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
             
@@ -107,8 +114,19 @@ def m_grouped_gemm_persistent_kernel(
             for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
                 tl.multiple_of(token_ptrs, [16, 16])
                 tl.multiple_of(weight_ptrs, [16, 16])
-                a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
-                b_block = tl.load(weight_ptrs)
+                
+                if MASK_K and MASK_N:
+                    a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
+                    b_block = tl.load(weight_ptrs, mask=n_mask[None, :] and k_offset(0, BLOCK_K)[:, None] < K - k * BLOCK_K, other=0.0)
+                elif MASK_K:
+                    a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
+                    b_block = tl.load(weight_ptrs, mask=k_offset[:, None] < K - k * BLOCK_K, other=0.0)
+                elif MASK_N:
+                    a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
+                    b_block = tl.load(weight_ptrs, mask=n_mask[None, :], other=0.0)
+                else:
+                    a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
+                    b_block = tl.load(weight_ptrs)
                 acc = tl.dot(a_block, b_block, acc=acc) 
                 token_ptrs += BLOCK_K * token_strides[1]
                 weight_ptrs += BLOCK_K * weight_strides[1]
@@ -118,12 +136,12 @@ def m_grouped_gemm_persistent_kernel(
             if SCATTER_ROWS:
                 out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
                 out_ptrs = out_ptr + out_offsets
-                tl.store(out_ptrs, acc, mask=token_mask[:, None])
+                tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
             else:
                 out_row_offsets = start_idx + tile_m_offsets
                 out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
                 out_ptrs = out_ptr + out_offsets
-                tl.store(out_ptrs, acc, mask=token_mask[:, None])
+                tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
 
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
