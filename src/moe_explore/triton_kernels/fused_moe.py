@@ -14,9 +14,13 @@ from .autotune_config import (
 class FusedMoeParams:
     weight: torch.Tensor
     group_indices: torch.Tensor
-    permute_indices: torch.Tensor
+    permute_indices: Optional[torch.Tensor]
     gather: bool
     scatter: bool
+    # `num_tokens` is confusing. When doing a scatter or gather, it's the number of tokens
+    # before routing! If we are NOT doing a scatter or gather, it's just the number of tokens being input.
+    # If we do a gather, `num_tokens` is the number of tokens in the input, before the gather.
+    # Similar for when we do a scatter, it's the number of tokens in the output, after the scatter.
     num_tokens: int
     topk: int
     scales: Optional[torch.Tensor]
@@ -43,16 +47,30 @@ def m_grouped_gemm_persistent_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr
 ):
-    tl.static_assert(K % BLOCK_K == 0)
-    tl.static_assert(N % BLOCK_N == 0)
+    MASK_K: tl.constexpr = K % BLOCK_K != 0
+    MASK_N: tl.constexpr = N % BLOCK_N != 0
 
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
+    
+    tl.assume(tile_id >= 0)
+    tl.assume(token_strides[0] > 0)
+    tl.assume(token_strides[1] > 0)
+    tl.assume(weight_strides[0] > 0)
+    tl.assume(weight_strides[1] > 0)
+    tl.assume(weight_strides[2] > 0)
+    tl.assume(out_strides[0] > 0)
+    tl.assume(out_strides[1] > 0)
 
     for problem_id in tl.range(0, E, flatten=True):
         end_idx = tl.load(group_indices_ptr + problem_id + 1)
         start_idx = tl.load(group_indices_ptr + problem_id)
         m = end_idx - start_idx
+        
+        tl.assume(start_idx >= 0)
+        tl.assume(end_idx >= start_idx)
+        tl.assume(m >= 0)
+        
         num_m_tiles = tl.cdiv(m, BLOCK_M)
         num_n_tiles = tl.cdiv(N, BLOCK_N)
         num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
@@ -84,9 +102,11 @@ def m_grouped_gemm_persistent_kernel(
             weight_row_offsets = tl.arange(0, BLOCK_K)[:, None] * weight_strides[1]
             weight_col_offsets = tile_n_offsets * weight_strides[2]
             weight_ptrs = weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
-
+            
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
-            for k in range(0, tl.cdiv(K, BLOCK_K)):
+            for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                tl.multiple_of(token_ptrs, [16, 16])
+                tl.multiple_of(weight_ptrs, [16, 16])
                 a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
                 b_block = tl.load(weight_ptrs)
                 acc = tl.dot(a_block, b_block, acc=acc) 
@@ -120,10 +140,9 @@ _max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     reset_to_zero=['out_ptr']
 )(m_grouped_gemm_persistent_kernel)
 
-def get_output_rows(num_tokens: int, topk: int, gather: bool, scatter: bool):
-    if gather and not scatter:
-        return num_tokens * topk
-    return num_tokens
+@torch.compile
+def scale_and_reduce(out, scales, num_tokens, topk, n):
+    return (out.view(num_tokens, topk, n) * scales[..., None]).sum(1)
 
 def fused_moe(
     token: torch.Tensor,
@@ -143,7 +162,10 @@ def fused_moe(
 
     default_kwargs = {}
     if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
-        default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64, "NUM_PROGRAMS": get_gpu_sm_count()}
+        if not params.scatter:
+            default_kwargs = {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "NUM_PROGRAMS": get_gpu_sm_count(), "num_warps": 8, "num_stages": 4}
+        elif params.scatter:
+            default_kwargs = {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 32, "NUM_PROGRAMS": 4 * get_gpu_sm_count(), "num_warps": 4, "num_stages": 4}
         func = m_grouped_gemm_persistent_kernel
     elif autotune_mode == AutotuneMode.FAST:
         func = _fast_autotune_m_grouped_gemm_persistent_kernel
@@ -156,7 +178,9 @@ def fused_moe(
         c_rows = num_tokens
 
     out = torch.empty((c_rows, n), device=token.device, dtype=token.dtype)
+    
     grid = lambda META: (META["NUM_PROGRAMS"],)
+        
     func[grid](
         token, 
         token.stride(),
@@ -177,6 +201,6 @@ def fused_moe(
     )
 
     if params.scales is not None and params.scatter:
-        out = (out.view(num_tokens, params.topk, n) * params.scales[..., None]).sum(1)
+        out = scale_and_reduce(out, params.scales, num_tokens, params.topk, n)
 
     return out
