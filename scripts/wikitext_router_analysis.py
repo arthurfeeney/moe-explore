@@ -1,8 +1,5 @@
 import argparse
 from datasets import load_dataset, DatasetDict
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn
 from transformers import (
     AutoModelForCausalLM, 
     AutoConfig, 
@@ -52,18 +49,18 @@ def main():
     )
     print(model)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenized_dataset = tokenized_wikitext(tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=args.hf_cache_dir)
+    tokenized_dataset = tokenized_wikitext(tokenizer, args.hf_cache_dir)
 
-    seq_len = min(1000, tokenized_dataset.input_ids.size(1))
-    stride = 64
+    num_tokens = min(50000, tokenized_dataset.input_ids.size(1))
+    seq_len = 64
 
     model.eval()
     with torch.no_grad():
         expert_counts = torch.zeros(model_config.num_hidden_layers, model_config.num_experts, device=device)
-        for step in range(0, seq_len, stride):
+        for step in range(0, num_tokens, seq_len):
             print(f"step {step}")
-            input_ids = tokenized_dataset.input_ids[..., step:step + stride]
+            input_ids = tokenized_dataset.input_ids[..., step:step + seq_len]
             output = model(input_ids=input_ids.to(device), output_router_logits=True)
             for layer_idx in range(model_config.num_hidden_layers):
                 selected_experts = router(output.router_logits[layer_idx], topk=model_config.num_experts_per_tok)
@@ -72,15 +69,15 @@ def main():
 
     to_save = {
         "expert_counts": expert_counts.detach().cpu(),
-        "num_tokens": seq_len,
-        "stride": stride,
+        "num_tokens": num_tokens,
+        "seq_len": seq_len,
         "model_name": args.model_name,
         "dataset_name": "wikitext"
     }
     torch.save(to_save, f"wikitext_counts_{args.model_name}.pt")
 
-def tokenized_wikitext(tokenizer):
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-103-v1")
+def tokenized_wikitext(tokenizer, cache_dir):
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-103-v1", cache_dir=cache_dir)
     assert isinstance(dataset, DatasetDict)
     assert "test" in dataset
     assert "train" in dataset

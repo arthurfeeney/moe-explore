@@ -11,6 +11,9 @@ args = parser.parse_args()
 
 data = torch.load(args.load_pt)
 
+print("Visualizing:")
+print(data)
+
 expert_counts: torch.Tensor = data["expert_counts"]
 num_tokens: int = data["num_tokens"]
 model_name: Optional[str] = data.get("model_name")
@@ -18,6 +21,10 @@ dataset_name: Optional[str] = data.get("dataset_name")
 
 expert_counts = expert_counts.numpy()
 expert_percentages = 100 * (expert_counts / num_tokens)
+
+for i in range(0, expert_percentages.shape[0], 10):
+    print(f"Percentaages for layer {i}: {expert_percentages[i].tolist()}")
+
 ax = seaborn.heatmap(expert_percentages, cbar_kws={"label": "Routing Percentages"})
 ax.set(xlabel="Expert", ylabel="Layer")
 colorbar = ax.collections[0].colorbar
