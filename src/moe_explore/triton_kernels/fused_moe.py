@@ -84,10 +84,10 @@ def m_grouped_gemm_persistent_kernel(
             if MASK_N:
                 n_mask = tile_n_offsets < N
 
-            if GATHER_ROWS or SCATTER_ROWS:
-                permute_indices_offsets = start_idx + tile_m_offsets
-                token_mask = permute_indices_offsets < end_idx
-                permute_token_indices = tl.load(permute_indices_ptr + permute_indices_offsets,
+            token_mask = start_idx + tile_m_offsets < end_idx
+
+            if GATHER_ROWS:
+                permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
                                                 mask=token_mask, 
                                                 other=0)
             
@@ -95,9 +95,6 @@ def m_grouped_gemm_persistent_kernel(
                 token_indices = permute_token_indices // TOPK
             else:
                 token_indices = start_idx + tile_m_offsets
-
-            if not (GATHER_ROWS or SCATTER_ROWS):
-                token_mask = start_idx + tile_m_offsets < end_idx
 
             k_offset = tl.arange(0, BLOCK_K)
 
@@ -127,6 +124,7 @@ def m_grouped_gemm_persistent_kernel(
                 else:
                     a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
                     b_block = tl.load(weight_ptrs)
+                    
                 acc = tl.dot(a_block, b_block, acc=acc) 
                 token_ptrs += BLOCK_K * token_strides[1]
                 weight_ptrs += BLOCK_K * weight_strides[1]
@@ -134,6 +132,9 @@ def m_grouped_gemm_persistent_kernel(
             acc = acc.to(out_ptr.dtype.element_ty)
 
             if SCATTER_ROWS:
+                permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
+                                                mask=token_mask, 
+                                                other=0)               
                 out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
                 out_ptrs = out_ptr + out_offsets
                 tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
@@ -198,7 +199,7 @@ def fused_moe(
     out = torch.empty((c_rows, n), device=token.device, dtype=token.dtype)
     
     grid = lambda META: (META["NUM_PROGRAMS"],)
-        
+
     func[grid](
         token, 
         token.stride(),

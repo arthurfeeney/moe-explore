@@ -5,6 +5,7 @@ from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.params import GLUParams, MOEParams
 from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
+from moe_explore.triton_kernels.glu import glu, GLUParams
 
 import triton.profiler as proton
 
@@ -59,6 +60,21 @@ def moe_glu_grouped_gemm_fused(
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
 
     with proton.scope("moe"):
+        
+        glu_params = GLUParams(
+            ep.gate_weight,
+            ep.up_weight,
+            perm_to_group_indices.group_indices,
+            perm_to_group_indices.indices,
+            gather=True,
+            num_tokens=num_tokens,
+            topk=params.topk,
+            activation="silu"
+        )
+        
+        gated = glu(input, glu_params, autotune_mode=autotune_mode)
+        
+        """
         gate_params = FusedMoeParams(
             ep.gate_weight,
             perm_to_group_indices.group_indices,
@@ -87,6 +103,7 @@ def moe_glu_grouped_gemm_fused(
         )
 
         gated = gate * up
+        """
 
         down_params = FusedMoeParams(
             ep.down_weight,

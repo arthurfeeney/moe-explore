@@ -1,7 +1,7 @@
 import math
 import torch
 import torch.nn.functional as F
-from moe_explore.triton_kernels.fused_moe import FusedMoeParams
+from moe_explore.triton_kernels.fused_moe import FusedMoeParams, scale_and_reduce
 from moe_explore.params import MLPParams, GLUParams
 
 def torch_grouped_matmul_gather_scatter(
@@ -40,8 +40,51 @@ def torch_grouped_matmul_gather_scatter(
             c[glo:ghi] = prod
             
     if params.scatter and params.scales is not None:
-        c = (c.view(-1, params.topk, b.size(-1)) * params.scales[..., None]).sum(1)
+        c = scale_and_reduce(c, params.scales, params.num_tokens, params.topk, b.size(-1))
             
+    return c
+
+def activation(x, activation: str):
+    if activation == "silu":
+        return torch.nn.functional.silu(x)
+    elif activation == "gelu":
+        return torch.nn.functional.gelu(x, approximate='tanh')
+    else:
+        raise ValueError(f"Invalid activation: {activation}")
+
+def torch_grouped_glu(
+    a: torch.Tensor,
+    params: FusedMoeParams,
+):
+    r"""
+    This is a reference implementation of a GLU, with an optional
+    fused gather operation.
+    """
+    assert params.gate_weight.size() == params.up_weight.size()
+    
+    dtype = a.dtype
+    group_indices = params.group_indices
+    gather_indices = params.permute_indices // params.topk if params.gather else None
+    
+    if params.gather:
+        c_rows = a.size(0) * params.topk
+    else:
+        c_rows = a.size(0)    
+    c = torch.zeros(c_rows, params.gate_weight.size(-1), device=a.device, dtype=dtype)
+    
+    for i in range(params.gate_weight.size(0)):
+        glo, ghi = group_indices[i].item(), group_indices[i + 1].item()
+        if params.gather:
+            index = gather_indices[glo:ghi].unsqueeze(-1).expand(-1, a.size(-1))
+            a_gather = torch.gather(a, dim=0, index=index)
+        else:
+            a_gather = a[glo:ghi]
+            
+        gate_prod = activation(a_gather @ params.gate_weight[i], params.activation)
+        up_prod = a_gather @ params.up_weight[i]
+
+        c[glo:ghi] = gate_prod * up_prod
+         
     return c
 
 def random_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):
@@ -205,3 +248,25 @@ def random_glu(
         dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim),
         activation
     )
+    
+def uniform_weight_init(size, device, dtype):
+    r"""
+    This is based on pytorch's initialization for linear layers.
+    1. For testing, we only use a uniform distribution. 
+        The issue with testing against a normal distribution is that
+        the output values can occassionally be quite large, which
+        can make it difficult to set appropriate tolerances.
+    2. MoE weights cannot use the default torch.nn.init functions because
+        the fan_in / fan_out modes may not be "aware" that there is a batch
+        of weights.  This somewhat arbitrary uses the last dim as the `fan` factor.
+        (without explicitly noting that it's `fan_in` or `fan_out`--just tests, 
+        so I don't think it really matters.)
+    3. This is sort of arbitrarily chosen to be based on xavier uniform.
+    """
+    assert len(size) == 3
+    weight = torch.empty(size, device=device, dtype=dtype)
+    fan1, fan2 = size[1], size[2]
+    std = math.sqrt(2 / (fan1 + fan2))
+    a = math.sqrt(3) * std
+    weight.uniform_(-a, a)
+    return weight
