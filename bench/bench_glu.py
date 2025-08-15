@@ -7,7 +7,8 @@ from moe_explore.functional.glu import (
         moe_glu_grouped_gemm_fused,
         moe_glu_grouped_gemm
 )
-from moe_explore.testing import random_glu, MOEParams
+from moe_explore.testing import random_glu
+from moe_explore.params import MOEParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 
 import sys
@@ -121,7 +122,7 @@ def benchmark_moe_forward(
     input = torch.randn((batch_size * seq_len, input_dim), device=torch.device("cuda"), dtype=torch.bfloat16)
 
     quantiles = [0.5, 0.2, 0.8]
-    autotune_mode = AutotuneMode.FAST
+    autotune_mode = AutotuneMode.NONE
     if provider == "torch":
         ms, min_ms, max_ms = do_bench(lambda: moe_glu_torch(input, moe_params, autotune_mode), quantiles=quantiles)
     elif provider == "grouped_gemm":

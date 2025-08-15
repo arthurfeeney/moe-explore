@@ -163,7 +163,7 @@ def test_moe_glu_grouped_gemm_fused(
         ("cuda", 128, 2048, 1024, OlmoeConfig, olmoe_forward),
         ("cuda", 128, 1024, 768, Qwen3MoeConfig, qwen3_moe_forward)
     ])
-def test_olmoe(device, seq_len, input_dim, hidden_dim, Config, forward):
+def test_huggingface(device, seq_len, input_dim, hidden_dim, Config, forward):
 
     config = Config(
        hidden_size=input_dim,

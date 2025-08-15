@@ -115,36 +115,34 @@ def m_grouped_glu_persistent_kernel(
             gate_weight_ptrs = gate_weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
             up_weight_ptrs = up_weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
 
-            acc = tl.zeros((2, BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
+            acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
+            acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
             for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
                 tl.multiple_of(token_ptrs, [16, 16])
                 tl.multiple_of(gate_weight_ptrs, [16, 16])
                 tl.multiple_of(up_weight_ptrs, [16, 16])
                 
                 tokens_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
-                tokens_block = tl.broadcast_to(tl.expand_dims(tokens_block, 0), (2, BLOCK_M, BLOCK_K))
                 
                 gate_weights_block = tl.load(gate_weight_ptrs)
                 up_weights_block = tl.load(up_weight_ptrs)
                 
-                # [2, BLOCK_K, BLOCK_N]
-                weights = tl.permute(tl.join(gate_weights_block, up_weights_block), (2, 0, 1))
+                acc_gate = tl.dot(tokens_block, gate_weights_block, acc=acc_gate)
+                acc_up = tl.dot(tokens_block, up_weights_block, acc=acc_up)
                 
                 # Batch matmul [2, BLOCK_M, BLOCK_N]
-                acc = tl.dot(tokens_block, weights, acc=acc) 
+                #acc = tl.dot(tokens_block, weights, acc=acc) 
                 token_ptrs += BLOCK_K * token_strides[1]
                 gate_weight_ptrs += BLOCK_K * weight_strides[1]
                 up_weight_ptrs += BLOCK_K * weight_strides[1]
-
-            # Epilogue!
-            gate_acc, up_acc = tl.split(tl.permute(acc, (1, 2, 0)))
             
+            # Apply activation on float32 accumulator, because sigmoid and tanh need float32.
             if ACTIVATION == "silu":
-                gate_acc = silu(gate_acc)
+                acc_gate = silu(acc_gate)
             elif ACTIVATION == "gelu":
-                gate_acc = gelu(gate_acc)
+                acc_gate = gelu(acc_gate)
             
-            gated_acc = gate_acc * up_acc
+            gated_acc = acc_gate * acc_up
             gated_acc = gated_acc.to(out_ptr.dtype.element_ty)
             
             out_row_offsets = start_idx + tile_m_offsets
@@ -188,7 +186,7 @@ def glu(
 
     default_kwargs = {}
     if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
-        default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32, "NUM_PROGRAMS": get_gpu_sm_count(), "num_warps": 8, "num_stages": 4}
+        default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "NUM_PROGRAMS": get_gpu_sm_count(), "num_warps": 4, "num_stages": 4}
         func = m_grouped_glu_persistent_kernel
     elif autotune_mode == AutotuneMode.FAST:
         func = _fast_autotune_m_grouped_glu_persistent_kernel
