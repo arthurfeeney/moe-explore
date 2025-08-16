@@ -1,6 +1,7 @@
 import torch
 from torch.profiler import record_function
 
+from moe_explore.functional.activation import activation
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.params import GLUParams, MOEParams
@@ -33,7 +34,7 @@ def moe_glu_torch(
                 expert_tokens = input[exp_token_idxs]
                 
                 expert_gate = expert_tokens @ ep.gate_weight[expert_id]
-                expert_gate = ep.activation(expert_gate)
+                expert_gate = activation(expert_gate, ep.activation)
                 expert_up = expert_tokens @ ep.up_weight[expert_id]
                 expert_out = (expert_gate * expert_up) @ ep.down_weight[expert_id]
 
@@ -69,42 +70,11 @@ def moe_glu_grouped_gemm_fused(
             gather=True,
             num_tokens=num_tokens,
             topk=params.topk,
-            activation="silu"
+            activation=ep.activation
         )
         
         gated = glu(input, glu_params, autotune_mode=autotune_mode)
         
-        """
-        gate_params = FusedMoeParams(
-            ep.gate_weight,
-            perm_to_group_indices.group_indices,
-            perm_to_group_indices.indices,
-            gather=True,
-            scatter=False,
-            num_tokens=num_tokens,
-            topk=params.topk,
-            scales=None
-        )
-
-        gate = fused_moe(
-            input, 
-            gate_params,
-            autotune_mode=autotune_mode
-        )
-        gate = ep.activation(gate)
-
-        up_params = gate_params
-        up_params.weight = ep.up_weight
-
-        up = fused_moe(
-            input, 
-            up_params,
-            autotune_mode=autotune_mode
-        )
-
-        gated = gate * up
-        """
-
         down_params = FusedMoeParams(
             ep.down_weight,
             perm_to_group_indices.group_indices,
@@ -153,7 +123,7 @@ def moe_glu_grouped_gemm(
             gate_params,
             autotune_mode=autotune_mode
         )
-        gate = ep.activation(gate)
+        gate = activation(gate, ep.activation)
 
         up_params = gate_params
         up_params.weight = ep.up_weight 

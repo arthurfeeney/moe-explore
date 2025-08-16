@@ -48,7 +48,7 @@ def activation(x, activation: str):
     if activation == "silu":
         return torch.nn.functional.silu(x)
     elif activation == "gelu":
-        return torch.nn.functional.gelu(x, approximate='tanh')
+        return torch.nn.functional.gelu(x)
     else:
         raise ValueError(f"Invalid activation: {activation}")
 

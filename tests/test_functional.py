@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 import pytest
 import torch
@@ -5,6 +6,7 @@ from transformers.models.olmoe.configuration_olmoe import OlmoeConfig
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from typing import Callable, Union
 
+from moe_explore.functional.activation import Activation
 from moe_explore.functional.mlp import (
     moe_mlp_torch, 
     moe_mlp_grouped_gemm_fused,
@@ -43,13 +45,13 @@ class Params:
     hidden_dim: int
     num_experts: int
     topk: int
-    activation: Callable[[torch.Tensor], torch.Tensor]
+    activation: Activation
 
     def random(self, size, dtype=None):
         if dtype is None:
             dtype = self.dtype
         denom = size[-1]
-        return torch.randn(size, device=self.device, dtype=dtype) / denom
+        return torch.randn(size, device=self.device, dtype=dtype) / math.sqrt(denom)
 
     def random_input(self):
         return self.random((self.seq_len, self.input_dim))
@@ -79,13 +81,13 @@ class Params:
         )
 
 test_params = [
-    Params('cuda', torch.float16, 128, 128, 256, num_experts=8, topk=2, activation=torch.nn.functional.gelu),
-    Params('cuda', torch.float16, 256, 1024, 1024, 8, 2, torch.nn.functional.gelu),
-    Params('cuda', torch.float16, 999, 2048, 2048, 8, 2, torch.nn.functional.gelu),
-    Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, torch.nn.functional.gelu),
-    Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, torch.nn.functional.gelu),
-    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, torch.nn.functional.gelu),
-    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, torch.nn.functional.gelu),
+    Params('cuda', torch.float16, 128, 128, 256, num_experts=8, topk=2, activation="gelu"),
+    Params('cuda', torch.float16, 256, 1024, 1024, 8, 2, "gelu"),
+    Params('cuda', torch.float16, 999, 2048, 2048, 8, 2, "gelu"),
+    Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, "gelu"),
+    Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, "gelu"),
+    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, "gelu"),
+    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, "gelu"),
 ]
 
 @pytest.mark.parametrize("params", test_params)
@@ -152,6 +154,9 @@ def test_moe_glu_grouped_gemm_fused(
         moe_params
     )
 
+    print(ref_output)
+    print(gg_fused_output)
+
     assert gg_output.isfinite().all()
     assert gg_fused_output.isfinite().all()
     torch.testing.assert_close(ref_output, gg_output)
@@ -178,7 +183,7 @@ def test_huggingface(device, seq_len, input_dim, hidden_dim, Config, forward):
         hidden_dim,
         config.num_experts,
         config.num_experts_per_tok,
-        torch.nn.functional.silu
+        "silu"
     )
 
     input = params.random_input()

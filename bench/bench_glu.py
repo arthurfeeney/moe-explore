@@ -82,7 +82,7 @@ configs.append(
             seq_len=64,
             input_dim=2048,
             hidden_dim=768,
-            activation=torch.nn.functional.silu
+            activation="silu"
         ))
 configs.append(
         moe_benchmark(
@@ -92,7 +92,7 @@ configs.append(
             seq_len=64,
             input_dim=2048,
             hidden_dim=1024,
-            activation=torch.nn.functional.silu
+            activation="silu"
         ))
 
 @perf_report(configs)

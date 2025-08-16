@@ -3,6 +3,7 @@ from typing import Callable
 import torch
 from torch.profiler import record_function
 
+from moe_explore.functional.activation import activation
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
@@ -17,7 +18,6 @@ def moe_mlp_torch(
     with record_function("router"):
         topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
         flat_expert_weights = topk_scores.view(-1, 1)
-        #idxs, tokens_per_expert, token_idxs = get_token_indices(topk_indices, topk, num_experts)
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts)
 
     with record_function("moe"):
@@ -30,7 +30,7 @@ def moe_mlp_torch(
             expert_tokens = input[exp_token_idxs]
             
             expert_out = expert_tokens @ ep.weight1[expert_id]
-            expert_out = ep.activation(expert_out)
+            expert_out = activation(expert_out, ep.activation)
             expert_out = expert_out @ ep.weight2[expert_id]
 
             # scale by scores and reduce
@@ -68,7 +68,7 @@ def moe_mlp_grouped_gemm_fused(
         up_params,
         autotune_mode=autotune_mode
     )
-    h = ep.activation(h)
+    h = activation(h, ep.activation)
 
     down_params = FusedMoeParams(
         weight=ep.weight2, 
@@ -109,11 +109,12 @@ def moe_mlp_grouped_gemm(
         topk=params.topk,
         scales=None
     )
-    up = ep.activation(fused_moe(
+    up = fused_moe(
         perm_to_group_indices.tokens, 
         up_params,
         autotune_mode=autotune_mode
-    ))
+    )
+    up = activation(up, ep.activation)
 
     down_params = FusedMoeParams(
         weight=ep.weight2,

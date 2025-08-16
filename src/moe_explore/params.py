@@ -1,3 +1,4 @@
+from moe_explore.functional.activation import Activation
 from dataclasses import dataclass
 import math
 from typing import Union, Callable, Optional
@@ -8,7 +9,7 @@ class MLPParams:
     router_weight: torch.Tensor
     weight1: torch.Tensor
     weight2: torch.Tensor
-    activation: Callable
+    activation: Activation
 
 @dataclass
 class GLUParams:
@@ -16,7 +17,7 @@ class GLUParams:
     gate_weight: torch.Tensor
     up_weight: torch.Tensor
     down_weight: torch.Tensor
-    activation: Callable
+    activation: Activation
 
 @dataclass
 class MOEParams:

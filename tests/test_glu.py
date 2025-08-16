@@ -87,7 +87,7 @@ def test_glu_grouped_gather(
         True,
         num_tokens,
         topk,
-        activation="silu"
+        activation="gelu"
     )
     
     out = glu(input, params)
