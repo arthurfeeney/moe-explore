@@ -2,7 +2,7 @@ from functools import partial
 import math
 import torch
 from moe_explore.expert_permute import get_token_indices
-from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
+from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 from moe_explore.testing import random_groups, random_routing, random_skewed_routing, random_olmoe_routing
 from triton.testing import perf_report, do_bench, Benchmark
@@ -80,7 +80,7 @@ def benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype):
     input = torch.randn((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
     group_indices = random_groups(num_tokens, num_groups, device=torch.device("cuda"))
     weight = torch.randn((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) / math.sqrt(N)
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         group_indices,
         permute_indices=None,
@@ -91,13 +91,13 @@ def benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype):
         scales=None
     )
     quantiles = [0.5, 0.2, 0.8]
-    fused_moe(input, params, AutotuneMode.NONE)
-    return do_bench(lambda: fused_moe(input, params, AutotuneMode.NONE), quantiles=quantiles)
+    m_grouped_gemm(input, params, AutotuneMode.NONE)
+    return do_bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE), quantiles=quantiles)
 
 def benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p):
     input = torch.randn((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
     weight = torch.randn((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) / math.sqrt(N)
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         p.group_indices,
         permute_indices=p.indices,
@@ -108,14 +108,14 @@ def benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p
         scales=None
     )
     quantiles = [0.5, 0.2, 0.8]
-    fused_moe(input, params, AutotuneMode.NONE)
-    return do_bench(lambda: fused_moe(input, params, AutotuneMode.NONE), quantiles=quantiles)
+    m_grouped_gemm(input, params, AutotuneMode.NONE)
+    return do_bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE), quantiles=quantiles)
 
 def benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, p, topk_scores):
     num_tokens_times_top = num_tokens * topk
     input = torch.randn((num_tokens_times_top, K), device=torch.device("cuda"), dtype=dtype)
     weight = torch.randn((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) / math.sqrt(N)
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         p.group_indices,
         permute_indices=p.indices,
@@ -126,8 +126,8 @@ def benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, 
         scales=topk_scores
     )
     quantiles = [0.5, 0.2, 0.8]
-    fused_moe(input, params, AutotuneMode.NONE)
-    return do_bench(lambda: fused_moe(input, params, AutotuneMode.NONE), quantiles=quantiles)
+    m_grouped_gemm(input, params, AutotuneMode.NONE)
+    return do_bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE), quantiles=quantiles)
 
 def benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype):
     r"""

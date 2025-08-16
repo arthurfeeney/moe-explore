@@ -1,8 +1,8 @@
 import math
 import torch
-from moe_explore.triton_kernels.glu import (
-    glu,
-    GLUParams
+from moe_explore.triton_kernels.m_grouped_glu import (
+    m_grouped_glu,
+    MGroupedGLUParams
 )
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import torch_grouped_glu, random_routing, random_groups, uniform_weight_init
@@ -34,7 +34,7 @@ def test_glu_grouped(
     up_weight = uniform_weight_init((num_experts, K, N), dtype=dtype, device="cuda")
     group_indices = random_groups(num_tokens, num_experts, device="cuda")
         
-    params = GLUParams(
+    params = MGroupedGLUParams(
         gate_weight,
         up_weight,
         group_indices,
@@ -45,7 +45,7 @@ def test_glu_grouped(
         activation="silu"
     )
 
-    out = glu(input, params)
+    out = m_grouped_glu(input, params)
     ref = torch_grouped_glu(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
@@ -79,7 +79,7 @@ def test_glu_grouped_gather(
         zero_prefix=True
     )   
     
-    params = GLUParams(
+    params = MGroupedGLUParams(
         gate_weight,
         up_weight,
         p.group_indices,
@@ -90,7 +90,7 @@ def test_glu_grouped_gather(
         activation="gelu"
     )
     
-    out = glu(input, params)
+    out = m_grouped_glu(input, params)
     ref = torch_grouped_glu(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()

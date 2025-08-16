@@ -1,8 +1,8 @@
 import math
 import torch
-from moe_explore.triton_kernels.fused_moe import (
-    fused_moe,
-    FusedMoeParams
+from moe_explore.triton_kernels.m_grouped_gemm import (
+    m_grouped_gemm,
+    MGroupedGEMMParams
 )
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups
@@ -33,7 +33,7 @@ def test_fused_moe(
     weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
     group_indices = random_groups(num_tokens, num_experts, device="cuda")
         
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         group_indices,
         None,
@@ -44,7 +44,7 @@ def test_fused_moe(
         None
     )
     
-    out = fused_moe(input, params)
+    out = m_grouped_gemm(input, params)
     ref = torch_grouped_matmul_gather_scatter(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
@@ -77,7 +77,7 @@ def test_fused_moe_gather(
         zero_prefix=True
     )   
 
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         p.group_indices,
         p.indices,
@@ -88,7 +88,7 @@ def test_fused_moe_gather(
         None
     )
     
-    out = fused_moe(input, params)
+    out = m_grouped_gemm(input, params)
     ref = torch_grouped_matmul_gather_scatter(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
@@ -126,7 +126,7 @@ def test_fused_moe_scatter(
         zero_prefix=True
     )
 
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         p.group_indices,
         p.indices,
@@ -137,7 +137,7 @@ def test_fused_moe_scatter(
         topk_scores
     )
 
-    out = fused_moe(input, params)
+    out = m_grouped_gemm(input, params)
     ref = torch_grouped_matmul_gather_scatter(input, params)
     
     print(out)

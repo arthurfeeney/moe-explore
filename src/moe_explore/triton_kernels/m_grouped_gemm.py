@@ -11,7 +11,7 @@ from .autotune_config import (
 )
 
 @dataclass
-class FusedMoeParams:
+class MGroupedGEMMParams:
     weight: torch.Tensor
     group_indices: torch.Tensor
     permute_indices: Optional[torch.Tensor]
@@ -163,9 +163,9 @@ _max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
 def scale_and_reduce(out, scales, num_tokens, topk, n):
     return (out.view(num_tokens, topk, n) * scales[..., None]).sum(1)
 
-def fused_moe(
+def m_grouped_gemm(
     token: torch.Tensor,
-    params: FusedMoeParams,
+    params: MGroupedGEMMParams,
     autotune_mode: Optional[AutotuneMode] = None
 ):
     assert token.dim() == 2

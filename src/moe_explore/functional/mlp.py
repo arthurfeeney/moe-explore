@@ -6,7 +6,7 @@ from torch.profiler import record_function
 from moe_explore.functional.activation import activation
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
-from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
+from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.params import MOEParams, MLPParams
 
 def moe_mlp_torch(
@@ -52,7 +52,7 @@ def moe_mlp_grouped_gemm_fused(
     topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
     perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
 
-    up_params = FusedMoeParams(
+    up_params = MGroupedGEMMParams(
         weight=ep.weight1,
         group_indices=perm_to_group_indices.group_indices,
         permute_indices=perm_to_group_indices.indices,
@@ -63,14 +63,14 @@ def moe_mlp_grouped_gemm_fused(
         scales=None
     )
 
-    h = fused_moe(
+    h = m_grouped_gemm(
         input,
         up_params,
         autotune_mode=autotune_mode
     )
     h = activation(h, ep.activation)
 
-    down_params = FusedMoeParams(
+    down_params = MGroupedGEMMParams(
         weight=ep.weight2, 
         group_indices=perm_to_group_indices.group_indices,
         permute_indices=perm_to_group_indices.indices,
@@ -81,7 +81,7 @@ def moe_mlp_grouped_gemm_fused(
         scales=topk_scores
     )
 
-    h = fused_moe(
+    h = m_grouped_gemm(
         h,
         down_params,
         autotune_mode=autotune_mode
@@ -99,7 +99,7 @@ def moe_mlp_grouped_gemm(
     perm_to_group_indices = expert_input_permute(input, topk_indices, num_experts=params.num_experts, topk=params.topk)
     num_tokens = input.size(0) * params.topk
     
-    up_params = FusedMoeParams(
+    up_params = MGroupedGEMMParams(
         weight=ep.weight1,
         group_indices=perm_to_group_indices.group_indices,
         permute_indices=None,
@@ -109,14 +109,14 @@ def moe_mlp_grouped_gemm(
         topk=params.topk,
         scales=None
     )
-    up = fused_moe(
+    up = m_grouped_gemm(
         perm_to_group_indices.tokens, 
         up_params,
         autotune_mode=autotune_mode
     )
     up = activation(up, ep.activation)
 
-    down_params = FusedMoeParams(
+    down_params = MGroupedGEMMParams(
         weight=ep.weight2,
         group_indices=perm_to_group_indices.group_indices,
         permute_indices=None,
@@ -126,7 +126,7 @@ def moe_mlp_grouped_gemm(
         topk=params.topk,
         scales=None
     )
-    down = fused_moe(
+    down = m_grouped_gemm(
         up,
         down_params,
         autotune_mode=autotune_mode

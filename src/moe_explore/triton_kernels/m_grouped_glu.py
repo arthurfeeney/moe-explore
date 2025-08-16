@@ -12,7 +12,7 @@ from .autotune_config import (
 )
 
 @dataclass
-class GLUParams:
+class MGroupedGLUParams:
     gate_weight: torch.Tensor
     up_weight: torch.Tensor
     group_indices: torch.Tensor
@@ -172,9 +172,9 @@ _max_autotune_m_grouped_glu_persistent_kernel = triton.autotune(
     reset_to_zero=['out_ptr']
 )(m_grouped_glu_persistent_kernel)
 
-def glu(
+def m_grouped_glu(
     token: torch.Tensor,
-    params: GLUParams,
+    params: MGroupedGLUParams,
     autotune_mode: Optional[AutotuneMode] = None
 ):
     assert token.dim() == 2

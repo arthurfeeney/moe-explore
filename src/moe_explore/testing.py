@@ -1,12 +1,12 @@
 import math
 import torch
 import torch.nn.functional as F
-from moe_explore.triton_kernels.fused_moe import FusedMoeParams, scale_and_reduce
+from moe_explore.triton_kernels.m_grouped_gemm import MGroupedGEMMParams, scale_and_reduce
 from moe_explore.params import MLPParams, GLUParams
 
 def torch_grouped_matmul_gather_scatter(
     a: torch.Tensor,
-    params: FusedMoeParams,
+    params: MGroupedGEMMParams,
 ):
     r"""
     This is a reference implementation of a grouped matmul, with an optional
@@ -54,7 +54,7 @@ def activation(x, activation: str):
 
 def torch_grouped_glu(
     a: torch.Tensor,
-    params: FusedMoeParams,
+    params: MGroupedGEMMParams,
 ):
     r"""
     This is a reference implementation of a GLU, with an optional
@@ -223,12 +223,12 @@ def random_mlp(
     activation,
     device,
     dtype,
-    dist=torch.randn,
+    dist,
 ):
     return MLPParams(
-        dist((hidden_dim, num_experts), device=device, dtype=dtype) / math.sqrt(num_experts),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype) / math.sqrt(intermediate_dim),
-        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim),
+        dist((hidden_dim, num_experts), device=device, dtype=dtype),
+        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
+        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
     )
 
@@ -239,13 +239,13 @@ def random_glu(
     activation,
     device,
     dtype,
-    dist=torch.randn,
+    dist,
 ):
     return GLUParams(
-        dist((hidden_dim, num_experts), device=device, dtype=dtype) / math.sqrt(num_experts),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype) / math.sqrt(intermediate_dim),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype) / math.sqrt(intermediate_dim),
-        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype) / math.sqrt(hidden_dim),
+        dist((hidden_dim, num_experts), device=device, dtype=dtype),
+        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
+        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
+        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
     )
     

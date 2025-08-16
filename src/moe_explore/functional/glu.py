@@ -5,8 +5,8 @@ from moe_explore.functional.activation import activation
 from moe_explore.router import topk_router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.params import GLUParams, MOEParams
-from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
-from moe_explore.triton_kernels.glu import glu, GLUParams
+from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
+from moe_explore.triton_kernels.m_grouped_glu import m_grouped_glu, MGroupedGLUParams
 
 import triton.profiler as proton
 
@@ -15,7 +15,7 @@ def moe_glu_torch(
     params: MOEParams,
     autotune_mode = None
 ):
-    ep: GLUParams = params.expert_params
+    ep: MGroupedGLUParams = params.expert_params
     with proton.scope("router"):
         topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
         flat_expert_weights = topk_scores.view(-1, 1)
@@ -54,7 +54,7 @@ def moe_glu_grouped_gemm_fused(
     autotune_mode = None
 ):
     num_tokens = input.size(0)
-    ep: GLUParams = params.expert_params
+    ep: MGroupedGLUParams = params.expert_params
     with proton.scope("router"):
         topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
     with proton.scope("get_token_indices"):
@@ -62,7 +62,7 @@ def moe_glu_grouped_gemm_fused(
 
     with proton.scope("moe"):
         
-        glu_params = GLUParams(
+        glu_params = MGroupedGLUParams(
             ep.gate_weight,
             ep.up_weight,
             perm_to_group_indices.group_indices,
@@ -73,9 +73,9 @@ def moe_glu_grouped_gemm_fused(
             activation=ep.activation
         )
         
-        gated = glu(input, glu_params, autotune_mode=autotune_mode)
+        gated = m_grouped_glu(input, glu_params, autotune_mode=autotune_mode)
         
-        down_params = FusedMoeParams(
+        down_params = MGroupedGEMMParams(
             ep.down_weight,
             perm_to_group_indices.group_indices,
             perm_to_group_indices.indices,
@@ -86,7 +86,7 @@ def moe_glu_grouped_gemm_fused(
             scales=topk_scores
         )
 
-        down = fused_moe(
+        down = m_grouped_gemm(
             gated,
             down_params,
             autotune_mode=autotune_mode
@@ -99,7 +99,7 @@ def moe_glu_grouped_gemm(
     params: MOEParams,
     autotune_mode = None
 ):
-    ep: GLUParams = params.expert_params
+    ep: MGroupedGLUParams = params.expert_params
     with proton.scope("router"):
         topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
     with proton.scope("input_permute"):
@@ -108,7 +108,7 @@ def moe_glu_grouped_gemm(
     num_tokens = input.size(0) * params.topk
         
     with proton.scope("moe"):
-        gate_params = FusedMoeParams(
+        gate_params = MGroupedGEMMParams(
             ep.gate_weight,
             perm_to_group_indices.group_indices,
             permute_indices=None,
@@ -118,7 +118,7 @@ def moe_glu_grouped_gemm(
             topk=params.topk,
             scales=None
         )
-        gate = fused_moe(
+        gate = m_grouped_gemm(
             perm_to_group_indices.tokens, 
             gate_params,
             autotune_mode=autotune_mode
@@ -127,7 +127,7 @@ def moe_glu_grouped_gemm(
 
         up_params = gate_params
         up_params.weight = ep.up_weight 
-        up = fused_moe(
+        up = m_grouped_gemm(
             perm_to_group_indices.tokens, 
             up_params,
             autotune_mode=autotune_mode
@@ -135,7 +135,7 @@ def moe_glu_grouped_gemm(
 
         gated = gate * up
 
-        down_params = FusedMoeParams(
+        down_params = MGroupedGEMMParams(
             ep.down_weight,
             perm_to_group_indices.group_indices,
             None,
@@ -145,7 +145,7 @@ def moe_glu_grouped_gemm(
             topk=params.topk,
             scales=None
         )
-        down = fused_moe(
+        down = m_grouped_gemm(
             gated,
             down_params,
             autotune_mode=autotune_mode
