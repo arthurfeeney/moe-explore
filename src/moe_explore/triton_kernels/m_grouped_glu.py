@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import torch
 import triton
 import triton.language as tl
-from triton.language.extra.libdevice import tanh
 from typing import Optional
 from moe_explore.gpu_utils import get_gpu_sm_count
 from .autotune_config import (
@@ -10,6 +9,7 @@ from .autotune_config import (
     fast_autotune_configs, 
     max_autotune_configs
 )
+from .activation import TRITON_ACTIVATIONS
 
 @dataclass
 class MGroupedGLUParams:
@@ -21,25 +21,6 @@ class MGroupedGLUParams:
     num_tokens: int
     topk: int
     activation: str
-    
-@triton.jit
-def silu(tensor):
-    return tensor * tl.sigmoid(tensor)
-
-@triton.jit
-def approx_gelu(tensor):
-    # This is the approximation of gelu used by pytorch:
-    # https://docs.pytorch.org/docs/stable/generated/torch.nn.GELU.html
-    pi: tl.constexpr = 3.14159265358979323846
-    tensor_cubed = tensor * tensor * tensor
-    return 0.5 * tensor * (1 + tanh(tl.sqrt(2 / pi) * (tensor + 0.044715 * tensor_cubed)))
-
-@triton.jit
-def gelu(tensor):
-    # The actual GELU function:
-    # https://github.com/pytorch/pytorch/blob/838f22c57df8d788a55a7637f93327f5ff26cd88/torch/_refs/nn/functional/__init__.py#L1058
-    SQRT_1_DIV_2: tl.constexpr = 0.70710678118654752440
-    return tensor * 0.5 * (1 + tl.erf(tensor * SQRT_1_DIV_2))
 
 @triton.jit
 def m_grouped_glu_persistent_kernel(
@@ -75,7 +56,6 @@ def m_grouped_glu_persistent_kernel(
     """
     tl.static_assert(K % BLOCK_K == 0, "K must be a multiple of BLOCK_K")
     tl.static_assert(N % BLOCK_N == 0, "N must be a multiple of BLOCK_N")
-    tl.static_assert(ACTIVATION == "silu" or ACTIVATION == "gelu", "ACTIVATION must be either 'silu' or 'gelu'")
 
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -144,10 +124,7 @@ def m_grouped_glu_persistent_kernel(
                 up_weight_ptrs += BLOCK_K * weight_strides[1]
             
             # Apply activation on float32 accumulator, because sigmoid and tanh need float32.
-            if ACTIVATION == "silu":
-                acc_gate = silu(acc_gate)
-            elif ACTIVATION == "gelu":
-                acc_gate = gelu(acc_gate)
+            acc_gate = ACTIVATION(acc_gate)
             
             gated_acc = acc_gate * acc_up
             gated_acc = gated_acc.to(out_ptr.dtype.element_ty)
@@ -219,7 +196,7 @@ def m_grouped_glu(
         out.stride(),
         params.group_indices, 
         params.permute_indices, 
-        ACTIVATION=params.activation,
+        ACTIVATION=TRITON_ACTIVATIONS[params.activation],
         ACC_DTYPE=tl.float32,
         E=e, 
         K=k,
