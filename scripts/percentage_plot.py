@@ -1,75 +1,16 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import seaborn
-import matplotlib.pyplot as plt
+import torch
 
-olmoe_layer_10_probabilities = np.array([
-    18.016000747680664,
-    16.97599983215332,
-    12.5,
-    10.182000160217285,
-    7.372000217437744,
-    15.965999603271484,
-    9.168000221252441,
-    11.65999984741211,
-    15.418000221252441,
-    17.45800018310547,
-    10.972000122070312,
-    12.994000434875488,
-    9.003999710083008,
-    17.926000595092773,
-    13.156000137329102,
-    10.016000747680664,
-    8.604000091552734,
-    21.036001205444336,
-    8.51200008392334,
-    3.9600000381469727,
-    2.615999937057495,
-    6.663999557495117,
-    8.369999885559082,
-    16.756000518798828,
-    18.18600082397461,
-    2.8480000495910645,
-    7.323999881744385,
-    8.522000312805176,
-    9.532000541687012,
-    8.64799976348877,
-    12.092000007629395,
-    24.61400032043457,
-    15.369998931884766,
-    7.921999931335449,
-    13.118000030517578,
-    2.748000144958496,
-    16.31399917602539,
-    19.992000579833984,
-    9.77400016784668,
-    13.29800033569336,
-    37.53199768066406,
-    16.26799964904785,
-    7.850000381469727,
-    12.163999557495117,
-    18.804000854492188,
-    10.760000228881836,
-    7.861999988555908,
-    19.14000129699707,
-    6.973999977111816,
-    13.957999229431152,
-    9.121999740600586,
-    8.742000579833984,
-    12.018000602722168,
-    16.918001174926758,
-    26.756000518798828,
-    8.795999526977539,
-    4.7260003089904785,
-    16.59600067138672,
-    7.269999980926514,
-    11.458000183105469,
-    9.90999984741211,
-    6.0980000495910645,
-    26.756000518798828,
-    8.685999870300293,
-]) / 100.0
-olmoe_layer_10_probabilities = np.sort(olmoe_layer_10_probabilities)
+data = torch.load("wikitext_counts_qwen3.pt")
+print(data)
 
-ax = seaborn.lineplot(x=np.arange(len(olmoe_layer_10_probabilities)), y=olmoe_layer_10_probabilities)
-ax.set(xlabel="Expert", ylabel="Routing Percentage")
-plt.savefig("olmoe_layer_10_probabilities.png")
+olmoe_percentages = data["expert_counts"] / data["num_tokens"]
+olmoe_percentages, _ = olmoe_percentages.sort(dim=1)
+olmoe_percentages = olmoe_percentages.cpu().numpy()
+
+for i in range(olmoe_percentages.shape[0]):
+    ax = seaborn.lineplot(x=np.arange(len(olmoe_percentages[i])), y=olmoe_percentages[i])
+    ax.set(xlabel="Expert, Sorted by Routing Percentage", ylabel="Routing Percentage")
+plt.savefig(f"olmoe_layer_probabilities.png")
