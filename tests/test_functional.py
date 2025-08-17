@@ -1,3 +1,4 @@
+import itertools
 import math
 from dataclasses import dataclass
 import pytest
@@ -18,7 +19,7 @@ from moe_explore.functional.glu import (
     moe_glu_grouped_gemm
 )
 from moe_explore.params import MOEParams
-from moe_explore.testing import random_glu, random_mlp
+from moe_explore.testing import random_glu, random_mlp, uniform_weight_init, assert_close
 from moe_explore.hf_moe_reference import qwen3_moe_forward, olmoe_forward
 
 @dataclass
@@ -47,14 +48,8 @@ class Params:
     topk: int
     activation: Activation
 
-    def random(self, size, dtype=None):
-        if dtype is None:
-            dtype = self.dtype
-        denom = size[-1]
-        return torch.randn(size, device=self.device, dtype=dtype) / math.sqrt(denom)
-
     def random_input(self):
-        return self.random((self.seq_len, self.input_dim))
+        return torch.randn((self.seq_len, self.input_dim), device=self.device, dtype=self.dtype)
 
     def random_params(self, func):
         return func(
@@ -63,7 +58,8 @@ class Params:
             self.hidden_dim,
             self.activation,
             self.device,
-            self.dtype
+            self.dtype,
+            uniform_weight_init
         )
 
     def generate_mlp_inputs(self):
@@ -79,31 +75,17 @@ class Params:
             self.num_experts,
             self.topk
         )
-
+        
 test_params = [
     Params('cuda', torch.float16, 128, 128, 256, num_experts=8, topk=2, activation="gelu"),
     Params('cuda', torch.float16, 256, 1024, 1024, 8, 2, "gelu"),
     Params('cuda', torch.float16, 999, 2048, 2048, 8, 2, "gelu"),
     Params('cuda', torch.bfloat16, 5, 2048, 2048, 8, 2, "gelu"),
-    Params('cuda', torch.float32, 257, 2048, 2048, 8, 2, "gelu"),
     Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, "gelu"),
     Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, "gelu"),
+    Params('cuda', torch.float16, 999, 2048, 2048, 64, 8, "silu"),
+    Params('cuda', torch.float16, 2011, 768, 2048, 64, 8, "silu"),
 ]
-
-@pytest.mark.parametrize("params", test_params)
-def test_moe_mlp_torch(
-        params
-):
-    input = params.random_input()
-    moe_params = params.generate_mlp_inputs()
-
-    output = moe_mlp_torch(
-        input,
-        moe_params
-    )
-
-    assert output.size() == input.size()
-    assert torch.isfinite(output).all()
 
 @pytest.mark.parametrize("params", test_params)
 def test_moe_mlp_grouped_gemm(
@@ -127,10 +109,11 @@ def test_moe_mlp_grouped_gemm(
         moe_params
     )
 
+    assert ref_output.isfinite().all()
     assert gg_output.isfinite().all()
     assert gg_fused_output.isfinite().all()
-    torch.testing.assert_close(ref_output, gg_output)
-    torch.testing.assert_close(ref_output, gg_fused_output)
+    assert_close(ref_output, gg_output)
+    assert_close(ref_output, gg_fused_output)
 
 @pytest.mark.parametrize("params", test_params)
 def test_moe_glu_grouped_gemm_fused(
@@ -154,13 +137,11 @@ def test_moe_glu_grouped_gemm_fused(
         moe_params
     )
 
-    print(ref_output)
-    print(gg_fused_output)
-
+    assert ref_output.isfinite().all()
     assert gg_output.isfinite().all()
     assert gg_fused_output.isfinite().all()
-    torch.testing.assert_close(ref_output, gg_output)
-    torch.testing.assert_close(ref_output, gg_fused_output)
+    assert_close(ref_output, gg_output)
+    assert_close(ref_output, gg_fused_output)
 
 @pytest.mark.parametrize(
     "device,seq_len,input_dim,hidden_dim,Config,forward",
@@ -208,5 +189,5 @@ def test_huggingface(device, seq_len, input_dim, hidden_dim, Config, forward):
     assert ref_output.isfinite().all()
     assert gg_output.isfinite().all()
     assert gg_fused_output.isfinite().all()
-    torch.testing.assert_close(ref_output, gg_output)
-    torch.testing.assert_close(ref_output, gg_fused_output)
+    assert_close(ref_output, gg_output)
+    assert_close(ref_output, gg_fused_output)

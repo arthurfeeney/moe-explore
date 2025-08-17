@@ -5,7 +5,7 @@ from moe_explore.triton_kernels.m_grouped_gemm import (
     MGroupedGEMMParams
 )
 from moe_explore.expert_permute import get_token_indices
-from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups
+from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups, assert_close
 import pytest
 
 @pytest.mark.parametrize(
@@ -48,7 +48,7 @@ def test_fused_moe(
     ref = torch_grouped_matmul_gather_scatter(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
-    torch.testing.assert_close(out, ref)
+    assert_close(out, ref)
     
 @pytest.mark.parametrize(
     "num_tokens,num_experts,topk,K,N,dtype", 
@@ -92,7 +92,7 @@ def test_fused_moe_gather(
     ref = torch_grouped_matmul_gather_scatter(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
-    torch.testing.assert_close(out, ref)
+    assert_close(out, ref)
 
 @pytest.mark.parametrize(
     "num_tokens_times_topk,num_experts,topk,K,N,dtype", 
@@ -144,6 +144,4 @@ def test_fused_moe_scatter(
     print(ref)
         
     assert out.isfinite().all() and ref.isfinite().all()
-    # TODO: This atol is quite loose. default is 1e-5.
-    rtol = 1.6e-2 if dtype is torch.bfloat16 else 1e-3
-    torch.testing.assert_close(out, ref, atol=1e-3, rtol=rtol)
+    assert_close(out, ref)

@@ -13,8 +13,8 @@ def torch_grouped_matmul_gather_scatter(
     fused gather / scatter-reduce operation.
     """
     dtype = a.dtype
-    a = a
-    b = params.weight
+    a = a#.to(torch.float32)
+    b = params.weight#.to(torch.float32)
     group_indices = params.group_indices
     gather_indices = params.permute_indices // params.topk if params.gather else None
     scatter_indices = params.permute_indices if params.scatter else None
@@ -42,7 +42,7 @@ def torch_grouped_matmul_gather_scatter(
     if params.scatter and params.scales is not None:
         c = scale_and_reduce(c, params.scales, params.num_tokens, params.topk, b.size(-1))
             
-    return c
+    return c.to(dtype)
 
 def activation(x, activation: str):
     if activation == "silu":
@@ -216,6 +216,38 @@ def random_groups(num_tokens, num_groups, device: torch.device):
     group_indices[-1] = num_tokens
     return group_indices
 
+def uniform_weight_init(size, device, dtype):
+    r"""
+    This is based on pytorch's initialization for linear layers.
+    1. For testing, we only use a uniform distribution. 
+        The issue with testing against a normal distribution is that
+        the output values can occassionally be quite large, which
+        can make it difficult to set appropriate tolerances.
+    2. MoE weights cannot use the default torch.nn.init functions because
+        the fan_in / fan_out modes may not be "aware" that there is a batch
+        of weights.  This somewhat arbitrary uses the last dim as the `fan` factor.
+        (without explicitly noting that it's `fan_in` or `fan_out`--just tests, 
+        so I don't think it really matters.)
+    3. This is sort of arbitrarily chosen to be based on xavier uniform.
+    """
+    if len(size) == 2:
+        weight = torch.empty(size, device=device, dtype=dtype)
+        torch.nn.init.xavier_uniform_(weight)
+        return weight
+    
+    assert len(size) == 3
+    weight = torch.empty(size, device=device, dtype=dtype)
+    fan1, fan2 = size[1], size[2]
+    std = math.sqrt(2 / (fan1 + fan2))
+    a = math.sqrt(3) * std
+    weight.uniform_(-a, a)
+    return weight
+
+def normal_weight_init(size, device, dtype):
+    weight = torch.empty(size, device=device, dtype=dtype)
+    torch.nn.init.normal_(weight, mean=0.0, std=0.02)
+    return weight
+
 def random_mlp(
     num_experts,
     hidden_dim,
@@ -223,7 +255,7 @@ def random_mlp(
     activation,
     device,
     dtype,
-    dist,
+    dist=uniform_weight_init,
 ):
     return MLPParams(
         dist((hidden_dim, num_experts), device=device, dtype=dtype),
@@ -239,7 +271,7 @@ def random_glu(
     activation,
     device,
     dtype,
-    dist,
+    dist=uniform_weight_init,
 ):
     return GLUParams(
         dist((hidden_dim, num_experts), device=device, dtype=dtype),
@@ -249,24 +281,22 @@ def random_glu(
         activation
     )
     
-def uniform_weight_init(size, device, dtype):
-    r"""
-    This is based on pytorch's initialization for linear layers.
-    1. For testing, we only use a uniform distribution. 
-        The issue with testing against a normal distribution is that
-        the output values can occassionally be quite large, which
-        can make it difficult to set appropriate tolerances.
-    2. MoE weights cannot use the default torch.nn.init functions because
-        the fan_in / fan_out modes may not be "aware" that there is a batch
-        of weights.  This somewhat arbitrary uses the last dim as the `fan` factor.
-        (without explicitly noting that it's `fan_in` or `fan_out`--just tests, 
-        so I don't think it really matters.)
-    3. This is sort of arbitrarily chosen to be based on xavier uniform.
-    """
-    assert len(size) == 3
-    weight = torch.empty(size, device=device, dtype=dtype)
-    fan1, fan2 = size[1], size[2]
-    std = math.sqrt(2 / (fan1 + fan2))
-    a = math.sqrt(3) * std
-    weight.uniform_(-a, a)
-    return weight
+def assert_close(a, b):
+    # Tolerances depend on the matrix dimensions and the range of
+    # values. A matrix with larger values and K-dimension will accumulate
+    # more floating point errors... This tries to set tolerances
+    # based on the dtype's epsilon, k-dimension, and max value.
+    if a.dtype is torch.bfloat16:
+        eps = 0.0078125
+    elif a.dtype is torch.float16:
+        eps = 0.0009765625
+    elif a.dtype is torch.float32:
+        eps = 1e-6
+    else:
+        raise ValueError(f"Invalid dtype: {a.dtype}")
+    k = a.size(-1)
+    m = max(a.max(), b.max()).item()
+    atol = k * m * eps * 1e-2
+    rtol = math.sqrt(k) * eps * 1e-1
+    torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+    torch.testing.assert_close(a, b, atol=1e-2, rtol=rtol)

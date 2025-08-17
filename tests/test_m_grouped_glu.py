@@ -5,7 +5,7 @@ from moe_explore.triton_kernels.m_grouped_glu import (
     MGroupedGLUParams
 )
 from moe_explore.expert_permute import get_token_indices
-from moe_explore.testing import torch_grouped_glu, random_routing, random_groups, uniform_weight_init
+from moe_explore.testing import torch_grouped_glu, random_routing, random_groups, uniform_weight_init, assert_close
 import pytest
 
 @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ def test_glu_grouped(
     ref = torch_grouped_glu(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
-    torch.testing.assert_close(out, ref)
+    assert_close(out, ref)
     
 @pytest.mark.parametrize(
     "num_tokens,num_experts,topk,K,N,dtype", 
@@ -94,4 +94,4 @@ def test_glu_grouped_gather(
     ref = torch_grouped_glu(input, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
-    torch.testing.assert_close(out, ref)
+    assert_close(out, ref)
