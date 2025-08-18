@@ -27,7 +27,8 @@ tests = [
 ]
 bench = [
   # transformers and some inference engines are used for performance comparisons.
-  "transformers"
+  "transformers",
+  "llnl-hatchet" # used by proton-viewer
 ]
 scripts = [
   "accelerate",
