@@ -7,8 +7,8 @@ import argparse
 import math
 import torch
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
-from moe_explore.triton_kernels.fused_moe import fused_moe, FusedMoeParams
-from moe_explore.triton_kernels.glu import glu, GLUParams
+from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, FusedMoeParams
+from moe_explore.triton_kernels.m_grouped_glu import m_grouped_glu, MGroupedGLUParams
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import random_routing
 
@@ -43,7 +43,7 @@ def autotune_grouped_gemm_gather(
         None
     )
     
-    fused_moe(input, params, AutotuneMode.FAST)
+    m_grouped_gemm(input, params, AutotuneMode.FAST)
     
 def autotune_grouped_gemm_scatter(
     num_tokens_times_topk,
@@ -79,7 +79,7 @@ def autotune_grouped_gemm_scatter(
         topk_scores
     )
 
-    fused_moe(input, params, AutotuneMode.FAST)
+    m_grouped_gemm(input, params, AutotuneMode.FAST)
     
 def autotune_grouped_glu_gather(
     num_tokens,
@@ -100,7 +100,7 @@ def autotune_grouped_glu_gather(
         zero_prefix=True
     )   
 
-    params = GLUParams(
+    params = MGroupedGLUParams(
         gate_weight,
         up_weight,
         p.group_indices,
@@ -111,7 +111,7 @@ def autotune_grouped_glu_gather(
         "silu"
     )
     
-    glu(input, params, AutotuneMode.FAST)
+    m_grouped_glu(input, params, AutotuneMode.FAST)
 
 def main():
     parser = argparse.ArgumentParser()
