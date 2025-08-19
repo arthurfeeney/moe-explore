@@ -24,6 +24,111 @@ class MGroupedGEMMParams:
     num_tokens: int
     topk: int
     scales: Optional[torch.Tensor]
+    
+@triton.jit
+def m_grouped_gemm_inner(
+    token_ptr,
+    token_strides,
+    weight_ptr,
+    weight_strides,
+    out_ptr,
+    out_strides,
+    permute_indices_ptr,
+    problem_id,
+    tile_id,
+    last_problem_end,
+    start_idx, 
+    end_idx,
+    m,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    ACC_DTYPE: tl.constexpr,
+    GATHER_ROWS: tl.constexpr,
+    SCATTER_ROWS: tl.constexpr,
+    NUM_PROGRAMS: tl.constexpr
+):
+    MASK_N: tl.constexpr = N % BLOCK_N != 0
+    MASK_K: tl.constexpr = K % BLOCK_K != 0
+    
+    num_m_tiles = tl.cdiv(m, BLOCK_M)
+    num_n_tiles = tl.cdiv(N, BLOCK_N)
+    num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
+    while (tile_id >= last_problem_end and tile_id < last_problem_end + num_tiles):
+        tile_id_in_gemm = tile_id - last_problem_end
+        tile_m_idx = (tile_id_in_gemm // num_n_tiles) * BLOCK_M
+        tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
+        tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
+        tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
+        
+        if MASK_N:
+            n_mask = tile_n_offsets < N
+
+        token_mask = start_idx + tile_m_offsets < end_idx
+
+        if GATHER_ROWS:
+            permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
+                                            mask=token_mask, 
+                                            other=0)
+        
+        if GATHER_ROWS:
+            token_indices = permute_token_indices // TOPK
+        else:
+            token_indices = start_idx + tile_m_offsets
+
+        k_offset = tl.arange(0, BLOCK_K)
+
+        token_row_offsets = token_indices * token_strides[0]
+        token_col_offsets = k_offset * token_strides[1]
+        token_ptrs = token_ptr + token_row_offsets[:, None] + token_col_offsets
+
+        weight_problem_offset = problem_id * weight_strides[0]
+        weight_row_offsets = k_offset[:, None] * weight_strides[1]
+        weight_col_offsets = tile_n_offsets * weight_strides[2]
+        weight_ptrs = weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
+        
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
+        for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
+            tl.multiple_of(token_ptrs, [16, 16])
+            tl.multiple_of(weight_ptrs, [16, 16])
+            
+            if MASK_K and MASK_N:
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
+                b_block = tl.load(weight_ptrs, mask=n_mask[None, :] and k_offset(0, BLOCK_K)[:, None] < K - k * BLOCK_K, other=0.0)
+            elif MASK_K:
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
+                b_block = tl.load(weight_ptrs, mask=k_offset[:, None] < K - k * BLOCK_K, other=0.0)
+            elif MASK_N:
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
+                b_block = tl.load(weight_ptrs, mask=n_mask[None, :], other=0.0)
+            else:
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
+                b_block = tl.load(weight_ptrs)
+                
+            acc = tl.dot(a_block, b_block, acc=acc) 
+            token_ptrs += BLOCK_K * token_strides[1]
+            weight_ptrs += BLOCK_K * weight_strides[1]
+
+        acc = acc.to(out_ptr.dtype.element_ty)
+
+        if SCATTER_ROWS:
+            permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
+                                            mask=token_mask, 
+                                            other=0)               
+            out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
+            out_ptrs = out_ptr + out_offsets
+            tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
+        else:
+            out_row_offsets = start_idx + tile_m_offsets
+            out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
+            out_ptrs = out_ptr + out_offsets
+            tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
+
+        tile_id += NUM_PROGRAMS
+    return tile_id, num_tiles
 
 @triton.jit
 def m_grouped_gemm_persistent_kernel(
@@ -45,11 +150,10 @@ def m_grouped_gemm_persistent_kernel(
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr
+    BLOCK_K: tl.constexpr,
+    PROLOGUE: tl.constexpr,
+    EPILOGUE: tl.constexpr
 ):
-    MASK_K: tl.constexpr = K % BLOCK_K != 0
-    MASK_N: tl.constexpr = N % BLOCK_N != 0
-
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
     
@@ -71,80 +175,32 @@ def m_grouped_gemm_persistent_kernel(
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
         
-        num_m_tiles = tl.cdiv(m, BLOCK_M)
-        num_n_tiles = tl.cdiv(N, BLOCK_N)
-        num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
-        while (tile_id >= last_problem_end and tile_id < last_problem_end + num_tiles):
-            tile_id_in_gemm = tile_id - last_problem_end
-            tile_m_idx = (tile_id_in_gemm // num_n_tiles) * BLOCK_M
-            tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
-            tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
-            tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
-            
-            if MASK_N:
-                n_mask = tile_n_offsets < N
-
-            token_mask = start_idx + tile_m_offsets < end_idx
-
-            if GATHER_ROWS:
-                permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
-                                                mask=token_mask, 
-                                                other=0)
-            
-            if GATHER_ROWS:
-                token_indices = permute_token_indices // TOPK
-            else:
-                token_indices = start_idx + tile_m_offsets
-
-            k_offset = tl.arange(0, BLOCK_K)
-
-            token_row_offsets = token_indices * token_strides[0]
-            token_col_offsets = k_offset * token_strides[1]
-            token_ptrs = token_ptr + token_row_offsets[:, None] + token_col_offsets
-
-            weight_problem_offset = problem_id * weight_strides[0]
-            weight_row_offsets = k_offset[:, None] * weight_strides[1]
-            weight_col_offsets = tile_n_offsets * weight_strides[2]
-            weight_ptrs = weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
-            
-            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
-            for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
-                tl.multiple_of(token_ptrs, [16, 16])
-                tl.multiple_of(weight_ptrs, [16, 16])
-                
-                if MASK_K and MASK_N:
-                    a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
-                    b_block = tl.load(weight_ptrs, mask=n_mask[None, :] and k_offset(0, BLOCK_K)[:, None] < K - k * BLOCK_K, other=0.0)
-                elif MASK_K:
-                    a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
-                    b_block = tl.load(weight_ptrs, mask=k_offset[:, None] < K - k * BLOCK_K, other=0.0)
-                elif MASK_N:
-                    a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
-                    b_block = tl.load(weight_ptrs, mask=n_mask[None, :], other=0.0)
-                else:
-                    a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
-                    b_block = tl.load(weight_ptrs)
-                    
-                acc = tl.dot(a_block, b_block, acc=acc) 
-                token_ptrs += BLOCK_K * token_strides[1]
-                weight_ptrs += BLOCK_K * weight_strides[1]
-
-            acc = acc.to(out_ptr.dtype.element_ty)
-
-            if SCATTER_ROWS:
-                permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
-                                                mask=token_mask, 
-                                                other=0)               
-                out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
-                out_ptrs = out_ptr + out_offsets
-                tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
-            else:
-                out_row_offsets = start_idx + tile_m_offsets
-                out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
-                out_ptrs = out_ptr + out_offsets
-                tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
-
-            tile_id += NUM_PROGRAMS
+        tile_id, num_tiles = m_grouped_gemm_inner(
+            token_ptr,
+            token_strides,
+            weight_ptr,
+            weight_strides,
+            out_ptr,
+            out_strides,
+            permute_indices_ptr,
+            problem_id,
+            tile_id,
+            last_problem_end,
+            start_idx,
+            end_idx,
+            m,
+            N,
+            K,
+            TOPK,
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_K,
+            ACC_DTYPE,
+            GATHER_ROWS,
+            SCATTER_ROWS,
+            NUM_PROGRAMS
+        )
+        
         last_problem_end += num_tiles 
 
 _fast_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(

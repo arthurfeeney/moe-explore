@@ -28,7 +28,7 @@ def m_grouped_glu_persistent_kernel(
     token_strides,
     gate_weight_ptr,
     up_weight_ptr,
-    weight_strides, # Assuming gate_weight.stride == up_weight.stride()
+    weight_strides, # Assuming gate_weight.stride() == up_weight.stride()
     out_ptr,
     out_strides,
     group_indices_ptr,
@@ -45,15 +45,6 @@ def m_grouped_glu_persistent_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr
 ):
-    r"""
-    This kernel loads 
-        1. a [M, K] block from token_ptr.
-        2. two [K, N] blocks from gate_weight and up_weight.
-    The [M, K] block is expanded to be [2, M, K] and the weights
-    are mushed into a [2, K, N] block.
-    The result is a [2, M, N] block, which split into  `gate_acc` and `up_acc`.
-    These are element-wise multipled and the [M, N] result is stored in `out_ptr`
-    """
     tl.static_assert(K % BLOCK_K == 0, "K must be a multiple of BLOCK_K")
     tl.static_assert(N % BLOCK_N == 0, "N must be a multiple of BLOCK_N")
 
@@ -117,22 +108,19 @@ def m_grouped_glu_persistent_kernel(
                 acc_gate = tl.dot(tokens_block, gate_weights_block, acc=acc_gate)
                 acc_up = tl.dot(tokens_block, up_weights_block, acc=acc_up)
                 
-                # Batch matmul [2, BLOCK_M, BLOCK_N]
-                #acc = tl.dot(tokens_block, weights, acc=acc) 
                 token_ptrs += BLOCK_K * token_strides[1]
                 gate_weight_ptrs += BLOCK_K * weight_strides[1]
                 up_weight_ptrs += BLOCK_K * weight_strides[1]
             
             # Apply activation on float32 accumulator, because sigmoid and tanh need float32.
             acc_gate = ACTIVATION(acc_gate)
-            
-            gated_acc = acc_gate * acc_up
-            gated_acc = gated_acc.to(out_ptr.dtype.element_ty)
+            acc_gate = acc_gate.to(out_ptr.dtype.element_ty)            
+            gated = acc_gate * acc_up
             
             out_row_offsets = start_idx + tile_m_offsets
             out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
             out_ptrs = out_ptr + out_offsets
-            tl.store(out_ptrs, gated_acc, mask=token_mask[:, None])
+            tl.store(out_ptrs, gated, mask=token_mask[:, None])
 
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
