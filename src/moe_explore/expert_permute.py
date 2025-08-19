@@ -21,11 +21,12 @@ def get_token_indices(
     zero_prefix=False
 ):
     flat_expert_indices = expert_indices.view(-1)
-    indices = flat_expert_indices.argsort()
-    counts = torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts)
+    indices = flat_expert_indices.argsort()#.to(torch.int32)
+    counts = torch.zeros(num_experts, dtype=torch.int32, device=expert_indices.device)
+    torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts, out=counts)
 
     if zero_prefix:
-        group_indices = torch.empty(counts.size(0) + 1, dtype=torch.int64, device=expert_indices.device)
+        group_indices = torch.empty(counts.size(0) + 1, dtype=torch.int32, device=expert_indices.device)
         group_indices[0] = 0
         torch.cumsum(counts, dim=0, out=group_indices[1:])
     else:

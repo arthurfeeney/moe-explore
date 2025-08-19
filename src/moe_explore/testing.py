@@ -297,6 +297,6 @@ def assert_close(a, b):
     k = a.size(-1)
     m = max(a.max(), b.max()).item()
     atol = k * m * eps * 1e-2
+    atol = min(atol, 1e-2)
     rtol = math.sqrt(k) * eps * 1e-1
     torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
-    torch.testing.assert_close(a, b, atol=1e-2, rtol=rtol)
