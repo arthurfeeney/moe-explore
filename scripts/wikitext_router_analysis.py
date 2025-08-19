@@ -10,8 +10,10 @@ import torch.nn.functional as F
 
 OLMOE = "olmoe"
 QWEN3 = "qwen3"
+PHI3 = "phi3"
 OLMOE_HF = "allenai/OLMoE-1B-7B-0924"
 QWEN3_HF = "Qwen/Qwen3-30B-A3B"
+PHI3_HF = "microsoft/Phi-3.5-MoE-instruct"
 
 _MODEL_NAME_DICT = {
     OLMOE: OLMOE_HF,
