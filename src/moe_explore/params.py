@@ -24,6 +24,7 @@ class MOEParams:
     expert_params: Union[MLPParams, GLUParams]
     num_experts: int
     topk: int
+    normalize_routing: bool = False
 
 @dataclass
 class ExpertMatmulParams:

@@ -9,6 +9,7 @@ from moe_explore.expert_permute import get_token_indices, expert_input_permute, 
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.params import MOEParams, MLPParams
 
+@torch.compile
 def moe_mlp_torch(
     input,
     params: MOEParams,
@@ -16,7 +17,7 @@ def moe_mlp_torch(
 ):
     ep: MLPParams = params.expert_params
     with record_function("router"):
-        topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
+        topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk, normalize_routing=params.normalize_routing)
         flat_expert_weights = topk_scores.view(-1, 1)
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts)
 
@@ -49,7 +50,7 @@ def moe_mlp_grouped_gemm_fused(
     autotune_mode = None
 ):
     ep: MLPParams = params.expert_params
-    topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
+    topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk, normalize_routing=params.normalize_routing)
     perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
 
     up_params = MGroupedGEMMParams(
@@ -95,7 +96,7 @@ def moe_mlp_grouped_gemm(
     autotune_mode = None
 ):
     ep: MLPParams = params.expert_params
-    topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk)
+    topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk, normalize_routing=params.normalize_routing)
     perm_to_group_indices = expert_input_permute(input, topk_indices, num_experts=params.num_experts, topk=params.topk)
     num_tokens = input.size(0) * params.topk
     

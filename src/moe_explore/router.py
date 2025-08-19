@@ -4,14 +4,14 @@ from torch import nn
 @torch.compile
 def softmax(x):
     return nn.functional.softmax(x, dim=-1, dtype=torch.float32)
-    
+
 @torch.compile
 def topk_router(
     input: torch.Tensor,
     router_weight: torch.Tensor,
     topk: int,
     softmax_before_topk: bool = True,
-    renorm_scores: bool = False
+    normalize_routing: bool = False
 ):
     logits = input @ router_weight
     if softmax_before_topk:
@@ -22,7 +22,7 @@ def topk_router(
     if not softmax_before_topk:
         topk_scores = softmax(topk_scores)
 
-    if renorm_scores:
+    if normalize_routing:
         topk_scores /= topk_scores.sum(dim=-1, keepdim=True)
 
     topk_scores = topk_scores.to(input.dtype)
