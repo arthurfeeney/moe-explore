@@ -55,7 +55,7 @@ def m_grouped_gemm_inner(
     MASK_K: tl.constexpr = K % BLOCK_K != 0
     
     num_m_tiles = tl.cdiv(m, BLOCK_M)
-    num_n_tiles = tl.cdiv(N, BLOCK_N)
+    num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)
     num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
     while (tile_id >= last_problem_end and tile_id < last_problem_end + num_tiles):
         tile_id_in_gemm = tile_id - last_problem_end
@@ -73,8 +73,6 @@ def m_grouped_gemm_inner(
             permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
                                             mask=token_mask, 
                                             other=0)
-        
-        if GATHER_ROWS:
             token_indices = permute_token_indices // TOPK
         else:
             token_indices = start_idx + tile_m_offsets
@@ -151,8 +149,6 @@ def m_grouped_gemm_persistent_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    PROLOGUE: tl.constexpr,
-    EPILOGUE: tl.constexpr
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0

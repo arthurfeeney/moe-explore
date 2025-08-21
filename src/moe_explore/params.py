@@ -1,30 +1,48 @@
 from moe_explore.functional.activation import Activation
 from dataclasses import dataclass
-import math
-from typing import Union, Callable, Optional
+from typing import Union, Optional
 import torch
 
 @dataclass
-class MLPParams:
-    router_weight: torch.Tensor
+class FFNParams:
+    pass
+
+@dataclass
+class MLPParams(FFNParams):
     weight1: torch.Tensor
     weight2: torch.Tensor
     activation: Activation
 
 @dataclass
-class GLUParams:
-    router_weight: torch.Tensor
+class GLUParams(FFNParams):
     gate_weight: torch.Tensor
     up_weight: torch.Tensor
     down_weight: torch.Tensor
     activation: Activation
+    
+@dataclass
+class RouterParams:
+    pass
+    
+@dataclass
+class TopkRouterParams(RouterParams):
+    router_weight: torch.Tensor
+    topk: int
+    softmax_before_topk: bool = True
+    normalize_routing: bool = False
 
 @dataclass
+class ErnieRouterParams(RouterParams):
+    router_weight: torch.Tensor
+    bias: torch.Tensor
+    topk: int
+    
+@dataclass
 class MOEParams:
-    expert_params: Union[MLPParams, GLUParams]
+    router_params: RouterParams
+    expert_params: FFNParams
     num_experts: int
     topk: int
-    normalize_routing: bool = False
 
 @dataclass
 class ExpertMatmulParams:
