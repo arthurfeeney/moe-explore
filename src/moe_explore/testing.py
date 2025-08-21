@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn.functional as F
 from moe_explore.triton_kernels.m_grouped_gemm import MGroupedGEMMParams, scale_and_reduce
-from moe_explore.params import MLPParams, GLUParams
+from moe_explore.params import MLPParams, GLUParams, TopkRouterParams, ErnieRouterParams
 
 def torch_grouped_matmul_gather_scatter(
     a: torch.Tensor,
@@ -230,6 +230,11 @@ def uniform_weight_init(size, device, dtype):
         so I don't think it really matters.)
     3. This is sort of arbitrarily chosen to be based on xavier uniform.
     """
+    if len(size) == 1:
+        weight = torch.empty(size, device=device, dtype=dtype)
+        weight.uniform_(-0.02, 0.02)
+        return weight
+    
     if len(size) == 2:
         weight = torch.empty(size, device=device, dtype=dtype)
         torch.nn.init.xavier_uniform_(weight)
@@ -258,7 +263,6 @@ def random_mlp(
     dist=uniform_weight_init,
 ):
     return MLPParams(
-        dist((hidden_dim, num_experts), device=device, dtype=dtype),
         dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
         dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
@@ -274,11 +278,41 @@ def random_glu(
     dist=uniform_weight_init,
 ):
     return GLUParams(
-        dist((hidden_dim, num_experts), device=device, dtype=dtype),
         dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
         dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
         dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
+    )
+    
+def random_topk_router(
+    num_experts,
+    hidden_dim,
+    topk,
+    softmax_before_topk,
+    normalize_routing,
+    device, 
+    dtype,
+    dist=uniform_weight_init,
+):
+    return TopkRouterParams(
+        dist((hidden_dim, num_experts), device=device, dtype=dtype),
+        topk,
+        softmax_before_topk=softmax_before_topk,
+        normalize_routing=normalize_routing
+    )
+    
+def random_ernie_router(
+    num_experts,
+    hidden_dim,
+    topk,
+    device,
+    dtype,
+    dist=uniform_weight_init,
+):
+    return ErnieRouterParams(
+        dist((hidden_dim, num_experts), device=device, dtype=torch.float32),
+        dist((num_experts,), device=device, dtype=torch.float32),
+        topk,
     )
     
 def assert_close(a, b):
@@ -296,7 +330,6 @@ def assert_close(a, b):
         raise ValueError(f"Invalid dtype: {a.dtype}")
     k = a.size(-1)
     m = max(a.max(), b.max()).item()
-    atol = k * m * eps * 1e-2
-    atol = min(atol, 1e-2)
+    atol = min(1e-2, k * m * eps * 1e-2)
     rtol = math.sqrt(k) * eps * 1e-1
     torch.testing.assert_close(a, b, atol=atol, rtol=rtol)

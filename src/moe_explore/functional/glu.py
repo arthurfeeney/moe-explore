@@ -1,9 +1,9 @@
 import torch
 import triton.profiler as proton
 from moe_explore.functional.activation import activation
-from moe_explore.router import topk_router
+from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
-from moe_explore.params import MOEParams
+from moe_explore.params import MOEParams, GLUParams
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.m_grouped_glu import m_grouped_glu, MGroupedGLUParams
 
@@ -14,9 +14,9 @@ def moe_glu_torch(
     params: MOEParams,
     autotune_mode = None
 ):
-    ep: MGroupedGLUParams = params.expert_params
+    ep: GLUParams = params.expert_params
     with proton.scope("router"):
-        topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk, normalize_routing=params.normalize_routing)
+        topk_scores, topk_indices = router(input, params.router_params)
         flat_expert_weights = topk_scores.view(-1, 1)
     with proton.scope("get_token_indices"):
         #idxs, tokens_per_expert, token_idxs = get_token_indices(topk_indices, topk, num_experts)
@@ -55,7 +55,7 @@ def moe_glu_grouped_gemm_fused(
     num_tokens = input.size(0)
     ep: MGroupedGLUParams = params.expert_params
     with proton.scope("router"):
-        topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk, normalize_routing=params.normalize_routing)
+        topk_scores, topk_indices = router(input, params.router_params)
     with proton.scope("get_token_indices"):
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
 
@@ -100,7 +100,7 @@ def moe_glu_grouped_gemm(
 ):
     ep: MGroupedGLUParams = params.expert_params
     with proton.scope("router"):
-        topk_scores, topk_indices = topk_router(input, ep.router_weight, params.topk, normalize_routing=params.normalize_routing)
+        topk_scores, topk_indices = router(input, params.router_params)
     with proton.scope("input_permute"):
         perm_to_group_indices = expert_input_permute(input, topk_indices, num_experts=params.num_experts, topk=params.topk)
         
