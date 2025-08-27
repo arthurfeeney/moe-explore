@@ -7,8 +7,9 @@ import argparse
 import math
 import torch
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
-from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, FusedMoeParams
+from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.m_grouped_glu import m_grouped_glu, MGroupedGLUParams
+from moe_explore.triton_kernels.m_grouped_glu_interleaved import m_grouped_glu_interleaved, MGroupedGLUInterleavedParams
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import random_routing
 
@@ -32,7 +33,7 @@ def autotune_grouped_gemm_gather(
         zero_prefix=True
     )   
 
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         p.group_indices,
         p.indices,
@@ -68,7 +69,7 @@ def autotune_grouped_gemm_scatter(
         zero_prefix=True
     )
 
-    params = FusedMoeParams(
+    params = MGroupedGEMMParams(
         weight,
         p.group_indices,
         p.indices,
@@ -79,7 +80,7 @@ def autotune_grouped_gemm_scatter(
         topk_scores
     )
 
-    m_grouped_gemm(input, params, AutotuneMode.FAST)
+    m_grouped_gemm(input, params, AutotuneMode.MAX)
     
 def autotune_grouped_glu_gather(
     num_tokens,
@@ -111,15 +112,45 @@ def autotune_grouped_glu_gather(
         "silu"
     )
     
-    m_grouped_glu(input, params, AutotuneMode.FAST)
-
+    m_grouped_glu(input, params, AutotuneMode.MAX)
+    
+def autotune_grouped_glu_interleaved_gather(
+    num_tokens,
+    num_experts,
+    K,
+    N,
+    topk,
+    dtype
+):
+    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, 2 * N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    p = get_token_indices(
+        topk_indices.view(-1),
+        topk,
+        num_experts,
+        zero_prefix=True
+    )   
+    
+    params = MGroupedGLUInterleavedParams(
+        weight,
+        p.group_indices,
+        p.indices,
+        True,
+        num_tokens,
+        topk,
+        "silu"
+    )
+    
+    m_grouped_glu_interleaved(input, params, AutotuneMode.MAX)
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--kernel", 
         type=str, 
         required=True, 
-        choices=["gather", "scatter", "glu-gather"])
+        choices=["gather", "scatter", "glu-gather", "glu-interleaved-gather"])
     parser.add_argument("--num-tokens", type=int, required=True)
     args = parser.parse_args()
 
@@ -138,7 +169,8 @@ def main():
         autotune_grouped_gemm_scatter(num_tokens, num_experts, K, N, topk, dtype)
     elif args.kernel == "glu-gather":
         autotune_grouped_glu_gather(num_tokens, num_experts, K, N, topk, dtype)
-    
-
+    elif args.kernel == "glu-interleaved-gather":
+        autotune_grouped_glu_interleaved_gather(num_tokens, num_experts, K, N, topk, dtype)
+        
 if __name__ == "__main__":
     main()
