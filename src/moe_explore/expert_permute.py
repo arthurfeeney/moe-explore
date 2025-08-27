@@ -1,6 +1,7 @@
 import torch
 from typing import Union, Tuple
 from dataclasses import dataclass
+import triton.profiler as proton
 
 @dataclass
 class GroupedTokens:
@@ -21,7 +22,7 @@ def get_token_indices(
     zero_prefix=False
 ):
     flat_expert_indices = expert_indices.view(-1)
-    indices = flat_expert_indices.argsort()#.to(torch.int32)
+    indices = flat_expert_indices.argsort()
     counts = torch.zeros(num_experts, dtype=torch.int32, device=expert_indices.device)
     torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts, out=counts)
 
@@ -53,20 +54,20 @@ def expert_input_permute(
         indices=indices.indices 
     )
 
-@torch.compile
+# TODO: This seems faster without torch.compile
+@torch.compiler.disable()
 def expert_output_permute(
     grouped_tokens: GroupedTokens,
     expert_scores: torch.Tensor,
     topk: int,
     output_shape: Union[Tuple[int], torch.Size]
 ) -> torch.Tensor:
-    grouped_tokens.tokens.mul_(expert_scores.view(-1, 1)[grouped_tokens.indices])
-    output = torch.zeros(output_shape, dtype=grouped_tokens.tokens.dtype, device=grouped_tokens.tokens.device)
-    output.scatter_reduce_(
-        0,
-        # expand is used because scatter_reduce_ doesn't broadcast
-        grouped_tokens.indices.view(-1, 1).expand(-1, output_shape[-1]) // topk,
-        grouped_tokens.tokens,
-        reduce='sum'
-    )
-    return output
+    with proton.scope("allocate"):
+        tokens = torch.empty_like(grouped_tokens.tokens)
+    with proton.scope("scatter"):
+        tokens.scatter_(
+            dim=0,
+            index=grouped_tokens.indices.view(-1, 1).expand(-1, tokens.size(1)), 
+            src=grouped_tokens.tokens)
+    with proton.scope("scale-and-reduce"):
+        return torch.einsum("tkd,tk->td", tokens.view(-1, topk, tokens.size(1)), expert_scores)
