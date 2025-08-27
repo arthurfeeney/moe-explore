@@ -10,14 +10,15 @@ import torch.nn.functional as F
 
 OLMOE = "olmoe"
 QWEN3 = "qwen3"
-PHI3 = "phi3"
+ERNIE4 = "ernie4"
 OLMOE_HF = "allenai/OLMoE-1B-7B-0924"
 QWEN3_HF = "Qwen/Qwen3-30B-A3B"
-PHI3_HF = "microsoft/Phi-3.5-MoE-instruct"
+ERNIE4_HF = "baidu/ERNIE-4.5-21B-A3B-Base-PT"
 
 _MODEL_NAME_DICT = {
     OLMOE: OLMOE_HF,
-    QWEN3: QWEN3_HF
+    QWEN3: QWEN3_HF,
+    ERNIE4: ERNIE4_HF
 }
 
 def main():
@@ -27,7 +28,7 @@ def main():
         "--model-name", 
         type=str, 
         required=True,
-        choices=[OLMOE, QWEN3]
+        choices=[OLMOE, QWEN3, ERNIE4]
     )
     parser.add_argument(
         "--hf-cache-dir",
@@ -35,6 +36,9 @@ def main():
         required=True
     )
     args = parser.parse_args()
+    
+    print(args.model_name)
+    print(args.hf_cache_dir)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
@@ -45,7 +49,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
             model_name,
             cache_dir=args.hf_cache_dir,
-            low_cpu_mem_usage=True,
+            low_cpu_mem_usage=False,
             output_router_logits=True,
             device_map="auto"
     )
@@ -54,18 +58,21 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=args.hf_cache_dir)
     tokenized_dataset = tokenized_wikitext(tokenizer, args.hf_cache_dir)
 
-    num_tokens = min(50000, tokenized_dataset.input_ids.size(1))
-    seq_len = 64
+    print(tokenized_dataset.input_ids.size())
+
+    num_tokens = min(500000, tokenized_dataset.input_ids.size(1))
+    print(f"num_tokens: {num_tokens}")
+    seq_len = 512
 
     model.eval()
     with torch.no_grad():
-        expert_counts = torch.zeros(model_config.num_hidden_layers, model_config.num_experts, device=device)
+        expert_counts = torch.zeros(model_config.num_hidden_layers, model_config.num_experts, device="cpu")
         for step in range(0, num_tokens, seq_len):
             print(f"step {step}")
             input_ids = tokenized_dataset.input_ids[..., step:step + seq_len]
-            output = model(input_ids=input_ids.to(device), output_router_logits=True)
+            output = model(input_ids=input_ids, output_router_logits=True)
             for layer_idx in range(model_config.num_hidden_layers):
-                selected_experts = router(output.router_logits[layer_idx], topk=model_config.num_experts_per_tok)
+                selected_experts = router(output.router_logits[layer_idx], topk=model_config.num_experts_per_tok).to("cpu")
                 count = torch.bincount(selected_experts.view(-1), minlength=model_config.num_experts)
                 expert_counts[layer_idx] += count 
 
@@ -85,7 +92,7 @@ def tokenized_wikitext(tokenizer, cache_dir):
     assert "train" in dataset
     assert "validation" in dataset
 
-    token_dataset = dataset["test"]
+    token_dataset = dataset["train"]
     # This loads the entire wikitext dataset.
     # The .join is based from https://huggingface.co/docs/transformers/perplexity
     tokens = tokenizer("\n\n".join(token_dataset["text"]), return_tensors="pt")
