@@ -4,6 +4,7 @@ from moe_explore.triton_kernels.m_grouped_gemm import (
     m_grouped_gemm,
     MGroupedGEMMParams
 )
+from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups, assert_close
 import pytest
@@ -138,6 +139,7 @@ def test_fused_moe_scatter(
     )
 
     out = m_grouped_gemm(input, params)
+    out = scale_and_reduce(out, params.scales, params.num_tokens, params.topk, out.size(-1))
     ref = torch_grouped_matmul_gather_scatter(input, params)
     
     print(out)

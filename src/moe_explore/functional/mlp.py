@@ -4,6 +4,7 @@ import torch
 from torch.profiler import record_function
 
 from moe_explore.functional.activation import activation
+from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
@@ -87,6 +88,8 @@ def moe_mlp_grouped_gemm_fused(
         down_params,
         autotune_mode=autotune_mode
     )
+    h = scale_and_reduce(h, down_params.scales, input.size(0), params.topk, h.size(1))
+
     
     return h
 
