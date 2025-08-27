@@ -7,7 +7,8 @@ from moe_explore.functional.glu import (
         moe_glu_grouped_gemm_fused,
         moe_glu_grouped_gemm
 )
-from moe_explore.testing import random_glu
+from moe_explore.router import topk_router, ernie_router
+from moe_explore.testing import random_glu, random_topk_router, random_ernie_router
 from moe_explore.params import MOEParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 
@@ -22,12 +23,12 @@ try:
     HAVE_SCATTERMOE = True
 except ImportError:
     HAVE_SCATTERMOE = False
-    
+
 #from external.sglang_fused_moe import sglang_fused_moe
 #except ImportError:
 #    print("ScatterMoE and SGLang not installed, skipping")
 #    pass
-
+ 
 def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     r""" This computes the flops of a GLU forward pass. Flops are counted separately,
     so an FMA is counted as two flops.
@@ -44,7 +45,7 @@ def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     flop_per_sec = tera_flop_count / (ms / 1000)
     return flop_per_sec
 
-def moe_benchmark(plot_name, num_experts, act_experts, hidden_dim, input_dim, activation):
+def moe_benchmark(plot_name, model_name, num_experts, act_experts, hidden_dim, input_dim, activation):
     line_vals = ["torch", "grouped_gemm", "fused"]
     line_names = ["Torch", "Grouped GLU", "Fused GLU"]
     if HAVE_SCATTERMOE:
@@ -66,6 +67,7 @@ def moe_benchmark(plot_name, num_experts, act_experts, hidden_dim, input_dim, ac
         ylabel="ms",
         plot_name=plot_name,
         args={
+            "model_name": model_name,
             "num_experts": num_experts,
             "act_experts": act_experts,
             "hidden_dim": hidden_dim,
@@ -76,7 +78,8 @@ def moe_benchmark(plot_name, num_experts, act_experts, hidden_dim, input_dim, ac
 configs = []
 configs.append(
         moe_benchmark(
-            "Qwen3-30B-A3B_seq_len=64_experts=8_128",
+            "Qwen3-30B-A3B_experts=8_128",
+            model_name="qwen3",
             num_experts=128,
             act_experts=8,
             input_dim=2048,
@@ -85,16 +88,28 @@ configs.append(
         ))
 configs.append(
         moe_benchmark(
-            "OLMoE-1B-7B_seq_len=64_experts=8_64",
+            "OLMoE-1B-7B_experts=8_64",
+            model_name="olmoe",
             num_experts=64,
             act_experts=8,
             input_dim=2048,
             hidden_dim=1024,
             activation="silu"
         ))
+configs.append(
+        moe_benchmark(
+            "Ernie4.5_experts=6_64",
+            model_name="ernie4",
+            num_experts=64,
+            act_experts=6,
+            input_dim=2560,
+            hidden_dim=1536,
+            activation="silu"
+        ))
 
 @perf_report(configs)
 def benchmark_moe_forward(
+    model_name,
     num_experts,
     act_experts,
     hidden_dim, 
@@ -103,6 +118,27 @@ def benchmark_moe_forward(
     seq_len, 
     provider
 ):
+    if model_name == "ernie4":
+        router = ernie_router
+        router_params = random_ernie_router(
+            num_experts=num_experts,
+            hidden_dim=input_dim,
+            topk=act_experts,
+            device="cuda",
+            dtype=torch.bfloat16
+        )
+    else:
+        router = topk_router
+        router_params = random_topk_router(
+            num_experts=num_experts,
+            hidden_dim=input_dim,
+            topk=act_experts,
+            softmax_before_topk=True,
+            normalize_routing=True if model_name == "qwen3" else False,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+    
     glu_params = random_glu(
         num_experts=num_experts,
         hidden_dim=input_dim,
@@ -112,6 +148,7 @@ def benchmark_moe_forward(
         dtype=torch.bfloat16
     )
     moe_params = MOEParams(
+        router_params=router_params,
         expert_params=glu_params,
         num_experts=num_experts,
         topk=act_experts
@@ -126,6 +163,7 @@ def benchmark_moe_forward(
         ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm(input, moe_params, autotune_mode), quantiles=quantiles)
     elif provider == "fused":
         ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm_fused(input, moe_params, autotune_mode), quantiles=quantiles)
+    # Ernie4 forces the router to always use float32, scattermoe impl doesn't do that.
     elif provider == "scattermoe":
         glu = ScatterMoEGLU(
             input_size=input_dim, 
@@ -133,7 +171,7 @@ def benchmark_moe_forward(
             num_experts=moe_params.num_experts,
             top_k=moe_params.topk).to("cuda").to(torch.bfloat16)
         ms, min_ms, max_ms = do_bench(
-            lambda: scattermoe_forward(input, moe_params.expert_params.router_weight, glu, moe_params.topk),
+            lambda: scattermoe_forward(input, router, router_params, glu, moe_params.topk),
             quantiles=quantiles)
 
     return ms, min_ms, max_ms
