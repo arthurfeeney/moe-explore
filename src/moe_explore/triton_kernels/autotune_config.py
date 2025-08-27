@@ -23,7 +23,13 @@ def generate_configs(params: List[AutotuneParam]):
     values = [p.value for p in params]
     for combo in itertools.product(*values):
         dict_params = dict(zip(keys, combo))
-        configs.append(triton.Config(dict_params))
+        num_warps = dict_params.get("num_warps", 4)
+        num_stages = dict_params.get("num_stages", 3)
+        if "num_warps" in dict_params:
+            del dict_params["num_warps"]
+        if "num_stages" in dict_params:
+            del dict_params["num_stages"]
+        configs.append(triton.Config(dict_params, num_warps=num_warps, num_stages=num_stages))
     return configs
 
 def fast_autotune_configs(persistent: bool):
