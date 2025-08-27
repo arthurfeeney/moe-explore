@@ -2,6 +2,7 @@ import torch
 from typing import Union, Tuple
 from dataclasses import dataclass
 import triton.profiler as proton
+from moe_explore.triton_kernels.row_gather_scatter import row_gather, row_scatter
 
 @dataclass
 class GroupedTokens:
@@ -38,7 +39,7 @@ def get_token_indices(
         indices=indices
     )
 
-@torch.compile
+#@torch.compile(dynamic=True)
 def expert_input_permute(
     tokens: torch.Tensor, 
     expert_indices: torch.Tensor, 
@@ -47,7 +48,7 @@ def expert_input_permute(
 ) -> GroupedTokens:
     indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=True)
     token_dim = tokens.size(1)
-    output = torch.gather(tokens, dim=0, index=indices.indices.unsqueeze(1).expand(-1, token_dim) // topk)
+    output = row_gather(tokens, indices.indices // topk)
     return GroupedTokens(
         tokens=output,
         group_indices=indices.group_indices,
@@ -62,12 +63,7 @@ def expert_output_permute(
     topk: int,
     output_shape: Union[Tuple[int], torch.Size]
 ) -> torch.Tensor:
-    with proton.scope("allocate"):
-        tokens = torch.empty_like(grouped_tokens.tokens)
     with proton.scope("scatter"):
-        tokens.scatter_(
-            dim=0,
-            index=grouped_tokens.indices.view(-1, 1).expand(-1, tokens.size(1)), 
-            src=grouped_tokens.tokens)
+        tokens = row_scatter(grouped_tokens.tokens, grouped_tokens.indices)
     with proton.scope("scale-and-reduce"):
         return torch.einsum("tkd,tk->td", tokens.view(-1, topk, tokens.size(1)), expert_scores)
