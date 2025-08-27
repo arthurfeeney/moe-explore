@@ -59,7 +59,7 @@ def m_grouped_glu_persistent_kernel(
         tl.assume(start_idx >= 0)
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
-        
+
         num_m_tiles = tl.cdiv(m, BLOCK_M)
         num_n_tiles = tl.cdiv(N, BLOCK_N)
         num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
@@ -112,7 +112,6 @@ def m_grouped_glu_persistent_kernel(
                 gate_weight_ptrs += BLOCK_K * weight_strides[1]
                 up_weight_ptrs += BLOCK_K * weight_strides[1]
             
-            # Apply activation on float32 accumulator, because sigmoid and tanh need float32.
             acc_gate = ACTIVATION(acc_gate)
             acc_gate = acc_gate.to(out_ptr.dtype.element_ty)            
             gated = acc_gate * acc_up
@@ -158,7 +157,21 @@ def m_grouped_glu(
 
     default_kwargs = {}
     if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
-        default_kwargs = {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "NUM_PROGRAMS": get_gpu_sm_count(), "num_warps": 4, "num_stages": 4}
+        DEFAULT_BLOCK_M = 256
+        DEFAULT_BLOCK_N = 64
+        BLOCK_M = DEFAULT_BLOCK_M
+        BLOCK_N = DEFAULT_BLOCK_N
+        if BLOCK_M > triton.cdiv(params.num_tokens * params.topk, e):
+            BLOCK_M = max(16, triton.next_power_of_2(triton.cdiv(params.num_tokens * params.topk, e)))
+            BLOCK_N = min(256, DEFAULT_BLOCK_N * (DEFAULT_BLOCK_M // BLOCK_M))
+        default_kwargs = {
+            "BLOCK_M": BLOCK_M, 
+            "BLOCK_N": BLOCK_N, 
+            "BLOCK_K": 64, 
+            "NUM_PROGRAMS": get_gpu_sm_count(), 
+            "num_warps": 8, 
+            "num_stages": 3
+        }
         func = m_grouped_glu_persistent_kernel
     elif autotune_mode == AutotuneMode.FAST:
         func = _fast_autotune_m_grouped_glu_persistent_kernel
@@ -166,11 +179,11 @@ def m_grouped_glu(
         func = _max_autotune_m_grouped_glu_persistent_kernel
 
     if params.gather:
-        c_rows = num_tokens * params.topk
+        out_rows = num_tokens * params.topk
     else:
-        c_rows = num_tokens
+        out_rows = num_tokens
 
-    out = torch.empty((c_rows, n), device=token.device, dtype=token.dtype)
+    out = torch.empty((out_rows, n), device=token.device, dtype=token.dtype)
     
     grid = lambda META: (META["NUM_PROGRAMS"],)
 
