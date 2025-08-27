@@ -75,6 +75,10 @@ configs.append(
             dtype=torch.bfloat16
         ))
 
+def bench(f):
+    quantiles = [0.5, 0.2, 0.8]
+    return do_bench(lambda: f(), quantiles=quantiles, rep=500)
+
 def benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype):
     num_tokens = num_tokens * topk
     input = torch.randn((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
@@ -92,7 +96,7 @@ def benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype):
     )
     quantiles = [0.5, 0.2, 0.8]
     m_grouped_gemm(input, params, AutotuneMode.NONE)
-    return do_bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE), quantiles=quantiles)
+    return bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE))
 
 def benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p):
     input = torch.randn((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
@@ -109,7 +113,7 @@ def benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p
     )
     quantiles = [0.5, 0.2, 0.8]
     m_grouped_gemm(input, params, AutotuneMode.NONE)
-    return do_bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE), quantiles=quantiles)
+    return bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE))
 
 def benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, p, topk_scores):
     num_tokens_times_top = num_tokens * topk
@@ -127,11 +131,11 @@ def benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, 
     )
     quantiles = [0.5, 0.2, 0.8]
     m_grouped_gemm(input, params, AutotuneMode.NONE)
-    return do_bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE), quantiles=quantiles)
+    return bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE))
 
 def benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype):
     r"""
-    This is just a normal GEMM with a similar number of FLOPs to the grouped gemm
+    This is just a normal GEMM with the same number of FLOPs to other benchmarks
     benchmarks. This is just used a reference for performance.
     """
     num_tokens = num_tokens * topk
@@ -141,7 +145,11 @@ def benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype):
     quantiles = [0.5, 0.2, 0.8]
     f = torch.compile(torch.bmm)
     #f = torch.bmm
-    return do_bench(lambda: f(input, weight), quantiles=quantiles)
+    return bench(lambda: f(input, weight))
+
+def grouped_flops(num_tokens, num_groups, N, K, topk):
+    num_tokens = num_tokens * topk
+    return num_tokens * N * K * 2
 
 @perf_report(configs)
 def benchmark_m_grouped_gemm_forward(
@@ -154,10 +162,14 @@ def benchmark_m_grouped_gemm_forward(
     dtype,
     provider
 ):
+    # This benchmark uses random routers, so setting a seed for reproducible performance.
+    # Ideally, results for this benchmark should be averaged over multiple runs with different seeds.
+    torch.manual_seed(0)
+
     if provider == "gemm-reference":
-        return benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype)
+        ms, _, _ = benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype)
     if provider == "grouped-only":
-        return benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype)
+        ms, _, _ = benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype)
     if provider in ("grouped-gather", "grouped-scatter"):
         topk_scores, topk_indices = routing_func(num_tokens, num_groups, topk, device="cuda", dtype=dtype)
         p = get_token_indices(
@@ -167,12 +179,12 @@ def benchmark_m_grouped_gemm_forward(
             zero_prefix=True
         )
         if provider == "grouped-gather":
-            return benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p)
+            ms, _, _ = benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p)
         if provider == "grouped-scatter":
-            return benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, p, topk_scores)
-    raise ValueError(f"Invalid provider: {provider}")
+            ms, _, _ = benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, p, topk_scores)
+    flops = grouped_flops(num_tokens, num_groups, N, K, topk)
+    return flops / (ms / 1000) * 1e-12
+        
+    #raise ValueError(f"Invalid provider: {provider}")
 
-# This benchmark uses random routers, so setting a seed for reproducible performance.
-# Ideally, results for this benchmark should be averaged over multiple runs with different seeds.
-torch.manual_seed(0)
 benchmark_m_grouped_gemm_forward.run(print_data=True, save_path="./")

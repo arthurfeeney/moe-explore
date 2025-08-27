@@ -5,6 +5,9 @@ import seaborn
 import torch
 from typing import Optional
 
+plt.rcParams['figure.constrained_layout.use'] = True
+seaborn.set_theme(font_scale=1.1)
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-l", "--load-pt", type=str, required=True)
 args = parser.parse_args()
@@ -29,7 +32,8 @@ ax = seaborn.heatmap(expert_percentages, cbar_kws={"label": "Routing Percentages
 ax.set(xlabel="Expert", ylabel="Layer")
 colorbar = ax.collections[0].colorbar
 assert colorbar is not None
-colorbar_ticks = np.arange(0, expert_percentages.max(), expert_percentages.max() // 4).tolist()
+colorbar_ticks = np.linspace(0, expert_percentages.max(), 4).astype(int).tolist()
+colorbar_ticks = colorbar_ticks[:-1]
 colorbar_ticks.append(expert_percentages.max())
 print(colorbar_ticks)
 colorbar.set_ticks(colorbar_ticks)
@@ -42,8 +46,9 @@ if model_name is not None:
     fig_name_parts.append(model_name)
 fig_name_parts.append("percentages")
 fig_name = f"{'_'.join(fig_name_parts)}.png"
+print(f"Saving to {fig_name}")
 
-plt.savefig(fig_name)
+plt.savefig(fig_name, transparent=True)
 
 for idx in range(expert_percentages.shape[0]):
     min_perc = expert_percentages[idx].min()

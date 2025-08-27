@@ -14,7 +14,7 @@ def router(input:torch.Tensor, params: RouterParams):
     else:
         raise ValueError(f"Unsupported router type: {type(params)}")
 
-#@torch.compile
+@torch.compile
 def topk_router(
     input: torch.Tensor,
     router_params: TopkRouterParams

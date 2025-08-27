@@ -43,6 +43,7 @@ def olmoe_forward(
         params.expert_params.down_weight
     )
     output, _ = moe(input)
+    del moe
     return output
 
 class Qwen3Moe(Qwen3MoeSparseMoeBlock):
@@ -75,6 +76,7 @@ def qwen3_moe_forward(
         params.expert_params.down_weight
     )
     output, _ = moe(input)
+    del moe
     return output
 
 class Ernie4_5_Moe(Ernie4_5_MoeSparseMoeBlock):
@@ -111,4 +113,5 @@ def ernie4_5_moe_forward(
         params.expert_params.up_weight,
         params.expert_params.down_weight)
     output, _ = moe(input)
+    del moe
     return output
