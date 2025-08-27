@@ -21,6 +21,12 @@ class GLUParams(FFNParams):
     activation: Activation
     
 @dataclass
+class GLUInterleavedParams(FFNParams):
+    interleaved_weight: torch.Tensor
+    down_weight: torch.Tensor
+    activation: Activation
+    
+@dataclass
 class RouterParams:
     pass
     

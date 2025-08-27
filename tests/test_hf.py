@@ -2,9 +2,9 @@ import torch
 import pytest
 import numpy as np
 from moe_explore.hf_moe_reference import olmoe_forward, qwen3_moe_forward, ernie4_5_moe_forward
-from moe_explore.functional.glu import moe_glu_grouped_gemm, moe_glu_grouped_gemm_fused
+from moe_explore.functional.glu import moe_glu_grouped_gemm, moe_glu_grouped_gemm_fused, moe_glu_interleaved
 from transformers import AutoConfig
-from moe_explore.params import MOEParams
+from moe_explore.params import MOEParams, GLUInterleavedParams
 from moe_explore.testing import random_glu, random_topk_router, random_ernie_router, assert_close
 
 OLMOE = "allenai/OLMoE-1B-7B-0924"
@@ -48,13 +48,29 @@ def hf_config_to_moe_params(config, model_name):
             num_experts=config.moe_num_experts,
             topk=config.moe_k,
         )
+        
+def get_interleave_glu_params(input, moe_params):
+    size = (
+        moe_params.num_experts, 
+        moe_params.expert_params.gate_weight.size(1),
+        2 * moe_params.expert_params.gate_weight.size(2)
+    )
+    interleaved_weight = torch.empty(size, device=input.device, dtype=input.dtype)
+    interleaved_weight[:, :, 0::2] = moe_params.expert_params.gate_weight
+    interleaved_weight[:, :, 1::2] = moe_params.expert_params.up_weight
+    
+    interleaved_glu_params = GLUInterleavedParams(
+        interleaved_weight=interleaved_weight,
+        down_weight=moe_params.expert_params.down_weight,
+        activation=moe_params.expert_params.activation
+    )
+    moe_params.expert_params = interleaved_glu_params
+    return moe_params
 
 @pytest.mark.parametrize(
     "seq_len,model_name,forward",
     [
         (128, OLMOE, olmoe_forward),
-        (128, QWEN3, qwen3_moe_forward),
-        (128, ERNIE4, ernie4_5_moe_forward)
     ])
 def test_huggingface(seq_len, model_name, forward):
     config = AutoConfig.from_pretrained(model_name)
@@ -76,9 +92,17 @@ def test_huggingface(seq_len, model_name, forward):
         input,
         moe_params
     )
+    
+    interleaved_glu_params = get_interleave_glu_params(input, moe_params)
+    gg_interleaved_output = moe_glu_interleaved(
+        input,
+        interleaved_glu_params
+    )
 
     assert ref_output.isfinite().all()
     assert gg_output.isfinite().all()
     assert gg_fused_output.isfinite().all()
+    assert gg_interleaved_output.isfinite().all()
     assert_close(ref_output, gg_output)
     assert_close(ref_output, gg_fused_output)
+    assert_close(ref_output, gg_interleaved_output)

@@ -1,8 +1,9 @@
 import math
 import torch
 import torch.nn.functional as F
-from moe_explore.triton_kernels.m_grouped_gemm import MGroupedGEMMParams, scale_and_reduce
-from moe_explore.params import MLPParams, GLUParams, TopkRouterParams, ErnieRouterParams
+from moe_explore.functional.scale_and_reduce import scale_and_reduce
+from moe_explore.triton_kernels.m_grouped_gemm import MGroupedGEMMParams
+from moe_explore.params import MLPParams, GLUParams, GLUInterleavedParams, TopkRouterParams, ErnieRouterParams
 
 def torch_grouped_matmul_gather_scatter(
     a: torch.Tensor,
@@ -280,6 +281,21 @@ def random_glu(
     return GLUParams(
         dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
         dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
+        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
+        activation
+    )
+    
+def random_interleaved_glu(
+    num_experts,
+    hidden_dim,
+    intermediate_dim,
+    activation,
+    device,
+    dtype,
+    dist=uniform_weight_init,
+):
+    return GLUInterleavedParams(
+        dist((num_experts, hidden_dim, 2 * intermediate_dim), device=device, dtype=dtype),
         dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
     )
