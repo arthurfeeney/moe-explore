@@ -1,5 +1,6 @@
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 @triton.jit
 def silu(x: tl.tensor):
@@ -11,7 +12,7 @@ def approx_gelu(x: tl.tensor):
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.GELU.html
     pi: tl.constexpr = 3.14159265358979323846
     tensor_cubed = x * x * x
-    return 0.5 * x * (1 + tl.extra.device.tanh(tl.sqrt(2 / pi) * (x + 0.044715 * tensor_cubed)))
+    return 0.5 * x * (1 + libdevice.tanh(tl.sqrt(2 / pi) * (x + 0.044715 * tensor_cubed)))
 
 @triton.jit
 def gelu(x: tl.tensor):
