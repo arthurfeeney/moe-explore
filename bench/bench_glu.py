@@ -23,12 +23,7 @@ try:
     HAVE_SCATTERMOE = True
 except ImportError:
     HAVE_SCATTERMOE = False
-
-#from external.sglang_fused_moe import sglang_fused_moe
-#except ImportError:
-#    print("ScatterMoE and SGLang not installed, skipping")
-#    pass
- 
+     
 def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     r""" This computes the flops of a GLU forward pass. Flops are counted separately,
     so an FMA is counted as two flops.
@@ -106,6 +101,22 @@ configs.append(
             hidden_dim=1536,
             activation="silu"
         ))
+
+for num_experts in [8, 16, 32, 64, 128, 256, 512]:
+    for input_dim in [512, 1024, 2048]:
+        for hidden_dim in [512, 768, 1024, 1536]:
+            for act_experts in [2, 4, 6, 8]:
+                configs.append(
+                    moe_benchmark(
+                        f"Test-num_experts={num_experts}-input={input_dim}-hidden={hidden_dim}-k={act_experts}",
+                        model_name="test",
+                        num_experts=num_experts,
+                        act_experts=act_experts,
+                        input_dim=input_dim,
+                        hidden_dim=hidden_dim,
+                        activation="silu"
+                    )
+                )
 
 @perf_report(configs)
 def benchmark_moe_forward(

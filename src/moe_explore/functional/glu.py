@@ -108,7 +108,7 @@ def moe_glu_interleaved(
         topk_scores, topk_indices = router(input, params.router_params)
     with proton.scope("get_token_indices"):
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
-            
+        
     with proton.scope("fused_grouped_glu"):
         glu_params = MGroupedGLUInterleavedParams(
             ep.interleaved_weight,

@@ -1,13 +1,14 @@
 import torch
-from moe_explore.router import topk_router
+from typing import Callable
 from scattermoe.mlp import MLP
 
 def scattermoe_forward(
     input: torch.Tensor,
-    router_weight: torch.Tensor,
+    router: Callable,
+    router_params: torch.Tensor,
     mlp: MLP,
     topk: int
 ):
-    topk_scores, topk_indices = topk_router(input, router_weight, topk)
+    topk_scores, topk_indices = router(input, router_params)
     output = mlp(input, topk_scores, topk_indices) 
     return output

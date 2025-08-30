@@ -15,7 +15,7 @@ def test_row_gather(in_row, out_row, dim, dtype):
     gather_indices = torch.randint(0, in_row, (out_row,), device="cuda", dtype=torch.int32)
     output = row_gather(tokens, gather_indices)
     assert torch.allclose(output, tokens[gather_indices])
-    
+
 @pytest.mark.parametrize("in_row,dim,dtype", [
     (10, 10, torch.float16), 
     (10, 10, torch.float16),
@@ -26,8 +26,7 @@ def test_row_gather(in_row, out_row, dim, dtype):
 ])
 def test_row_permute(in_row, dim, dtype):
     tokens = torch.randn(in_row, dim, device="cuda", dtype=dtype)
-    scatter_indices = torch.randperm(in_row, device="cuda", dtype=torch.int64)
-    print(scatter_indices)
+    scatter_indices = torch.randperm(in_row, device="cuda", dtype=torch.int32)
     output = row_scatter(tokens, scatter_indices)
     ref_output = torch.zeros_like(tokens)
     ref_output[scatter_indices] = tokens

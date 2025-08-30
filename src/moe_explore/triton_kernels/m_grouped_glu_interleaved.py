@@ -47,8 +47,7 @@ def m_grouped_glu_interleaved_persistent_kernel(
     tl.static_assert(N % BLOCK_N == 0, "N must be a multiple of BLOCK_N")
     tl.static_assert((N // 2) % BLOCK_N == 0, "N must be a multiple of 2")
     
-    # Compiler error when defined inside the epilogue, where it's used... 
-    # Potentially a compiler bug?
+    # Compiler error with triton 3.3.1 when defining constexpr inside a while loop
     OUTPUT_BLOCK_N: tl.constexpr = BLOCK_N // 2
 
     tile_id = tl.program_id(axis=0)
