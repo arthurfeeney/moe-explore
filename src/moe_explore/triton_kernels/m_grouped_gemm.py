@@ -24,7 +24,7 @@ class MGroupedGEMMParams:
     num_tokens: int
     topk: int
     scales: Optional[torch.Tensor]
-    
+
 @triton.jit
 def m_grouped_gemm_inner(
     token_ptr,
@@ -94,10 +94,10 @@ def m_grouped_gemm_inner(
             tl.multiple_of(weight_ptrs, [16, 16])
             
             if MASK_K and MASK_N:
-                a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
-                b_block = tl.load(weight_ptrs, mask=n_mask[None, :] and k_offset(0, BLOCK_K)[:, None] < K - k * BLOCK_K, other=0.0)
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None] & (k_offset < K - k * BLOCK_K), other=0.0)
+                b_block = tl.load(weight_ptrs, mask=n_mask[None, :] & (k_offset(0, BLOCK_K)[:, None] < K - k * BLOCK_K), other=0.0)
             elif MASK_K:
-                a_block = tl.load(token_ptrs, mask=token_mask[:, None] and k_offset < K - k * BLOCK_K, other=0.0)
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None] & (k_offset < K - k * BLOCK_K), other=0.0)
                 b_block = tl.load(weight_ptrs, mask=k_offset[:, None] < K - k * BLOCK_K, other=0.0)
             elif MASK_N:
                 a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
@@ -118,12 +118,12 @@ def m_grouped_gemm_inner(
                                             other=0)               
             out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
             out_ptrs = out_ptr + out_offsets
-            tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
+            tl.store(out_ptrs, acc, mask=token_mask[:, None] & (tile_n_offsets < N))
         else:
             out_row_offsets = start_idx + tile_m_offsets
             out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
             out_ptrs = out_ptr + out_offsets
-            tl.store(out_ptrs, acc, mask=token_mask[:, None] and tile_n_offsets < N)
+            tl.store(out_ptrs, acc, mask=token_mask[:, None] & (tile_n_offsets < N))
 
         tile_id += NUM_PROGRAMS
     return tile_id, num_tiles
@@ -171,33 +171,7 @@ def m_grouped_gemm_persistent_kernel(
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
         
-        if 4 * m <= BLOCK_M and BLOCK_M // 4 >= 16:
-            tile_id, num_tiles = m_grouped_gemm_inner(
-                token_ptr,
-                token_strides,
-                weight_ptr,
-                weight_strides,
-                out_ptr,
-                out_strides,
-                permute_indices_ptr,
-                problem_id,
-                tile_id,
-                last_problem_end,
-                start_idx,
-                end_idx,
-                m,
-                N,
-                K,
-                TOPK,
-                BLOCK_M // 4,
-                BLOCK_N * 4,
-                BLOCK_K,
-                ACC_DTYPE,
-                GATHER_ROWS,
-                SCATTER_ROWS,
-                NUM_PROGRAMS
-            )
-        elif 2 * m <= BLOCK_M and BLOCK_M // 2 >= 16:
+        if 2 * m <= BLOCK_M and BLOCK_M // 2 >= 16:
             tile_id, num_tiles = m_grouped_gemm_inner(
                 token_ptr,
                 token_strides,

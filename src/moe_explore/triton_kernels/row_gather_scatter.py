@@ -31,7 +31,7 @@ def row_gather_kernel(
 
     output_offsets = (output_row_offsets * output_strides[0])[:, None] + col_offsets * output_strides[1]
     output_ptrs = output_ptr + output_offsets
-    tl.store(output_ptrs, tokens, mask=(output_row_offsets < OUTPUT_NUM_ROWS)[:, None] and (col_offsets < OUTPUT_NUM_COLS))
+    tl.store(output_ptrs, tokens, mask=(output_row_offsets < OUTPUT_NUM_ROWS)[:, None] & (col_offsets < OUTPUT_NUM_COLS))
 
 def row_gather(
     tokens: torch.Tensor,
@@ -81,12 +81,12 @@ def row_scatter_kernel(
 
     tokens_offsets = (row_offsets * tokens_strides[0])[:, None] + col_offsets * tokens_strides[1]
     tokens_ptrs = tokens_ptr + tokens_offsets
-    tokens = tl.load(tokens_ptrs, mask=(row_offsets < OUTPUT_NUM_ROWS)[:, None] and (col_offsets < OUTPUT_NUM_COLS), other=0.0)
+    tokens = tl.load(tokens_ptrs, mask=(row_offsets < OUTPUT_NUM_ROWS)[:, None] & (col_offsets < OUTPUT_NUM_COLS), other=0.0)
 
     scatter_row_indices = tl.load(scatter_indices_ptr + row_offsets, mask=row_offsets < OUTPUT_NUM_ROWS, other=0)
     output_offsets = (scatter_row_indices * output_strides[0])[:, None] + col_offsets * output_strides[1]
     output_ptrs = output_ptr + output_offsets
-    tl.store(output_ptrs, tokens, mask=(row_offsets < OUTPUT_NUM_ROWS)[:, None] and (col_offsets < OUTPUT_NUM_COLS))
+    tl.store(output_ptrs, tokens, mask=(row_offsets < OUTPUT_NUM_ROWS)[:, None] & (col_offsets < OUTPUT_NUM_COLS))
 
 def row_scatter(
     tokens: torch.Tensor,
