@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 import torch
 import triton
 import triton.language as tl
@@ -76,6 +77,11 @@ def m_grouped_gemm_inner(
             token_indices = permute_token_indices // TOPK
         else:
             token_indices = start_idx + tile_m_offsets
+            
+        if SCATTER_ROWS:
+            permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
+                                            mask=token_mask,
+                                            other=0)   
 
         k_offset = tl.arange(0, BLOCK_K)
 
@@ -110,21 +116,28 @@ def m_grouped_gemm_inner(
             token_ptrs += BLOCK_K * token_strides[1]
             weight_ptrs += BLOCK_K * weight_strides[1]
 
-        acc = acc.to(out_ptr.dtype.element_ty)
+        acc = tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2))
+        acc = tl.permute(acc, (0, 2, 1))
+        acc0, acc1 = tl.split(acc)
 
-        if SCATTER_ROWS:
-            permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
-                                            mask=token_mask, 
-                                            other=0)               
-            out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
+        tile_n_offsets0 = tile_n_idx + tl.arange(0, BLOCK_N // 2)
+        tile_n_offsets1 = tile_n_offsets0 + BLOCK_N // 2
+
+        if SCATTER_ROWS:         
+            out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets0 * out_strides[1]
             out_ptrs = out_ptr + out_offsets
-            tl.store(out_ptrs, acc, mask=token_mask[:, None] & (tile_n_offsets < N))
         else:
             out_row_offsets = start_idx + tile_m_offsets
-            out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets * out_strides[1]
+            out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets0 * out_strides[1]
             out_ptrs = out_ptr + out_offsets
-            tl.store(out_ptrs, acc, mask=token_mask[:, None] & (tile_n_offsets < N))
 
+        if MASK_N:
+            tl.store(out_ptrs, acc0, mask=token_mask[:, None] & (tile_n_offsets0 < N))
+            tl.store(out_ptrs + (BLOCK_N // 2) * out_strides[1], acc1, mask=token_mask[:, None] & (tile_n_offsets1 < N))
+        else:
+            tl.store(out_ptrs, acc0, mask=token_mask[:, None])
+            tl.store(out_ptrs + (BLOCK_N // 2) * out_strides[1], acc1 , mask=token_mask[:, None])
+        
         tile_id += NUM_PROGRAMS
     return tile_id, num_tiles
 
@@ -138,6 +151,7 @@ def m_grouped_gemm_persistent_kernel(
     out_strides,
     group_indices_ptr,
     permute_indices_ptr,
+    NUM_TOKENS: tl.constexpr,
     ACC_DTYPE: tl.constexpr,
     E: tl.constexpr,
     K: tl.constexpr,
@@ -170,73 +184,86 @@ def m_grouped_gemm_persistent_kernel(
         tl.assume(start_idx >= 0)
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
+        tl.assume(m <= NUM_TOKENS)
         
-        if 2 * m <= BLOCK_M and BLOCK_M // 2 >= 16:
-            tile_id, num_tiles = m_grouped_gemm_inner(
-                token_ptr,
-                token_strides,
-                weight_ptr,
-                weight_strides,
-                out_ptr,
-                out_strides,
-                permute_indices_ptr,
-                problem_id,
-                tile_id,
-                last_problem_end,
-                start_idx,
-                end_idx,
-                m,
-                N,
-                K,
-                TOPK,
-                BLOCK_M // 2,
-                BLOCK_N * 2,
-                BLOCK_K,
-                ACC_DTYPE,
-                GATHER_ROWS,
-                SCATTER_ROWS,
-                NUM_PROGRAMS
-            )
-        else:
-            tile_id, num_tiles = m_grouped_gemm_inner(
-                token_ptr,
-                token_strides,
-                weight_ptr,
-                weight_strides,
-                out_ptr,
-                out_strides,
-                permute_indices_ptr,
-                problem_id,
-                tile_id,
-                last_problem_end,
-                start_idx,
-                end_idx,
-                m,
-                N,
-                K,
-                TOPK,
-                BLOCK_M,
-                BLOCK_N,
-                BLOCK_K,
-                ACC_DTYPE,
-                GATHER_ROWS,
-                SCATTER_ROWS,
-                NUM_PROGRAMS
-            )
-        
+        tile_id, num_tiles = m_grouped_gemm_inner(
+            token_ptr,
+            token_strides,
+            weight_ptr,
+            weight_strides,
+            out_ptr,
+            out_strides,
+            permute_indices_ptr,
+            problem_id,
+            tile_id,
+            last_problem_end,
+            start_idx,
+            end_idx,
+            m,
+            N,
+            K,
+            TOPK,
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_K,
+            ACC_DTYPE,
+            GATHER_ROWS,
+            SCATTER_ROWS,
+            NUM_PROGRAMS
+        )
+
         last_problem_end += num_tiles 
 
 _fast_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
-    key=['E', 'N', 'K'],
+    key=['NUM_TOKENS', 'E', 'N', 'K', 'GATHER_ROWS', 'SCATTER_ROWS'],
     reset_to_zero=['out_ptr']
 )(m_grouped_gemm_persistent_kernel)
 
 _max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     configs=max_autotune_configs(persistent=True),
-    key=['E', 'N', 'K'],
+    key=['NUM_TOKENS', 'E', 'N', 'K', 'GATHER_ROWS', 'SCATTER_ROWS'],
     reset_to_zero=['out_ptr']
 )(m_grouped_gemm_persistent_kernel)
+
+def m_grouped_gemm_default_config(params):
+    e = params.weight.size(0)
+    avg_tokens_per_expert = triton.cdiv(params.num_tokens * params.topk, e)
+
+    BLOCK_M = 128
+    BLOCK_N = 256
+    BLOCK_K = 32
+    if not (params.gather or params.scatter):
+        default_config = triton.Config({
+                "BLOCK_M": BLOCK_M, 
+                "BLOCK_N": BLOCK_N, 
+                "BLOCK_K": BLOCK_K, 
+                "NUM_PROGRAMS": get_gpu_sm_count()
+            },
+            num_warps=8, 
+            num_stages=4
+        )
+    elif params.gather:
+        default_config = triton.Config({
+                "BLOCK_M": BLOCK_M, 
+                "BLOCK_N": BLOCK_N, 
+                "BLOCK_K": BLOCK_K, 
+                "NUM_PROGRAMS": get_gpu_sm_count()
+            },
+            num_warps=8, 
+            num_stages=4
+        )
+    elif params.scatter:
+        default_config = triton.Config({
+                "BLOCK_M": BLOCK_M, 
+                "BLOCK_N": BLOCK_N, 
+                "BLOCK_K": BLOCK_K, 
+                "NUM_PROGRAMS": get_gpu_sm_count()
+            },
+            num_warps=8, 
+            num_stages=4
+        )
+    return default_config
 
 def m_grouped_gemm(
     token: torch.Tensor,
@@ -254,44 +281,25 @@ def m_grouped_gemm(
     num_tokens = params.num_tokens
     e, k, n = params.weight.size()
 
-    default_kwargs = {}
-    if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
-        BLOCK_M = 128
-        if BLOCK_M > triton.cdiv(params.num_tokens * params.topk, e):
-            BLOCK_M = max(32, triton.next_power_of_2(triton.cdiv(params.num_tokens * params.topk, e)))
-        if not params.scatter:
-            default_kwargs = {
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": 256, 
-                "BLOCK_K": 32, 
-                "NUM_PROGRAMS": get_gpu_sm_count(), 
-                "num_warps": 8, 
-                "num_stages": 4
-            }
-        elif params.scatter:
-            default_kwargs = {
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": 128, 
-                "BLOCK_K": 32, 
-                "NUM_PROGRAMS": 4 * get_gpu_sm_count(), 
-                "num_warps": 4, 
-                "num_stages": 4
-            }
-        func = m_grouped_gemm_persistent_kernel
-    elif autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_m_grouped_gemm_persistent_kernel
-    elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_m_grouped_gemm_persistent_kernel
-
     if params.gather or params.scatter:
         out_rows = num_tokens * params.topk
     else:
         out_rows = num_tokens
 
     out = torch.empty((out_rows, n), device=token.device, dtype=token.dtype)
-    
+        
+    default_config = m_grouped_gemm_default_config(params)
+    default_kwargs = default_config.all_kwargs()
+    func = m_grouped_gemm_persistent_kernel
+    if autotune_mode == AutotuneMode.FAST:
+        func = _fast_autotune_m_grouped_gemm_persistent_kernel
+        default_kwargs = {}
+    elif autotune_mode == AutotuneMode.MAX:
+        func = _max_autotune_m_grouped_gemm_persistent_kernel
+        default_kwargs = {}
+        
     grid = lambda META: (META["NUM_PROGRAMS"],)
-
+    
     func[grid](
         token, 
         token.stride(),
@@ -301,6 +309,7 @@ def m_grouped_gemm(
         out.stride(),
         params.group_indices, 
         params.permute_indices, 
+        NUM_TOKENS=num_tokens,
         ACC_DTYPE=tl.float32,
         E=e, 
         K=k,

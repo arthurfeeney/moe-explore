@@ -91,10 +91,9 @@ def moe_glu_grouped_gemm_fused(
             down_params,
             autotune_mode=autotune_mode
         )
-        
+            
     with proton.scope("scale_and_reduce"):
         down = scale_and_reduce(down, down_params.scales, down_params.num_tokens, params.topk, down.size(-1))
-
 
     return down
 
@@ -168,11 +167,13 @@ def moe_glu_grouped_gemm(
             topk=params.topk,
             scales=None
         )
+        
         gate = m_grouped_gemm(
             perm_to_group_indices.tokens, 
             gate_params,
             autotune_mode=autotune_mode
         )
+        
     with proton.scope("activation"):
         gate = activation(gate, ep.activation)
 

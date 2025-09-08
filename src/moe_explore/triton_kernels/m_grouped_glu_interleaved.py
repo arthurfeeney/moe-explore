@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 import torch
 import triton
 import triton.language as tl
@@ -110,32 +111,82 @@ def m_grouped_glu_interleaved_persistent_kernel(
                 token_ptrs += BLOCK_K * token_strides[1]
                 weight_ptrs += BLOCK_K * weight_strides[1]
 
-            acc = acc.reshape(BLOCK_M, BLOCK_N // 2, 2)
+            out_tile_n_idx = (tile_id_in_gemm % num_n_tiles) * (BLOCK_N // 2)
+            tile_n_offsets0 = out_tile_n_idx + tl.arange(0, BLOCK_N // 4)
+            tile_n_offsets1 = out_tile_n_idx + BLOCK_N // 4
+
+            out_row_offsets = start_idx + tile_m_offsets
+            out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets0 * out_strides[1]
+            out_ptrs = out_ptr + out_offsets
+
+            # Note, there are multiple splits. One corresponds to epilogue splitting,
+            # and the others are to separate the interleaved the outputs for the
+            # `gate_weight` and `up_weight`.
+                
+            # Epilogue splitting: Compute epilogue on two halves of the tile.
+            acc = acc.reshape(BLOCK_M, 2, BLOCK_N // 2)
+            acc = tl.permute(acc, (0, 2, 1))
+            acc0, acc1 = tl.split(acc)
+            
+            # Split again on the interleaved weights.
+            acc = acc0.reshape(BLOCK_M, BLOCK_N // 4, 2)
             acc_gate, acc_up = acc.split()
             acc_gate = ACTIVATION(acc_gate)
             acc_gate = acc_gate.to(out_ptr.dtype.element_ty)
-            out_tile = acc_gate * acc_up
-               
-            out_row_offsets = start_idx + tile_m_offsets
-            out_offsets = out_row_offsets[:, None] * out_strides[0] + out_tile_n_offsets * out_strides[1]
-            out_ptrs = out_ptr + out_offsets
+            out_tile0 = acc_gate * acc_up
+            tl.store(out_ptrs, out_tile0, mask=token_mask[:, None])
             
-            tl.store(out_ptrs, out_tile, mask=token_mask[:, None])
+            acc = acc1.reshape(BLOCK_M, BLOCK_N // 4, 2)
+            acc_gate, acc_up = acc.split()
+            acc_gate = ACTIVATION(acc_gate)
+            acc_gate = acc_gate.to(out_ptr.dtype.element_ty)
+            out_tile1 = acc_gate * acc_up
+            tl.store(out_ptrs + (BLOCK_N // 4) * out_strides[1], out_tile1, mask=token_mask[:, None])
 
             tile_id += NUM_PROGRAMS
         last_problem_end += num_tiles 
 
 _fast_autotune_m_grouped_glu_interleaved_persistent_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
-    key=['E', 'N', 'K'],
+    key=["E", "N", "K", "GATHER_ROWS"],
     reset_to_zero=['out_ptr']
 )(m_grouped_glu_interleaved_persistent_kernel)
 
 _max_autotune_m_grouped_glu_interleaved_persistent_kernel = triton.autotune(
     configs=max_autotune_configs(persistent=True),
-    key=['E', 'N', 'K'],
+    key=["E", "N", "K", "GATHER_ROWS"],
     reset_to_zero=['out_ptr']
 )(m_grouped_glu_interleaved_persistent_kernel)
+
+def m_grouped_glu_interleaved_default_config(params):
+    e = params.weight.size(0)
+    avg_tokens_per_expert = triton.cdiv(params.num_tokens * params.topk, e)
+
+    BLOCK_M = 128
+    BLOCK_N = 256
+    BLOCK_K = 32
+    
+    if not params.gather:
+        default_config = triton.Config({
+                "BLOCK_M": BLOCK_M, 
+                "BLOCK_N": BLOCK_N, 
+                "BLOCK_K": BLOCK_K, 
+                "NUM_PROGRAMS": get_gpu_sm_count()
+            },
+            num_warps=8, 
+            num_stages=5
+        )
+    else:
+        default_config = triton.Config({
+                "BLOCK_M": BLOCK_M, 
+                "BLOCK_N": BLOCK_N, 
+                "BLOCK_K": BLOCK_K, 
+                "NUM_PROGRAMS": get_gpu_sm_count()
+            },
+            num_warps=8, 
+            num_stages=5
+        )
+    return default_config
 
 def m_grouped_glu_interleaved(
     token: torch.Tensor,
@@ -150,29 +201,12 @@ def m_grouped_glu_interleaved(
     assert params.weight.dim() == 3
     assert autotune_mode is None or autotune_mode in AutotuneMode
     assert params.activation in ("silu", "gelu")
-
     if params.gather:
         assert params.permute_indices is not None
 
     num_tokens = params.num_tokens
     e, k, n = params.weight.size()
-
-    default_kwargs = {}
-    if autotune_mode is None or autotune_mode == AutotuneMode.NONE:
-        default_kwargs = {
-            "BLOCK_M": 256, 
-            "BLOCK_N": 128, 
-            "BLOCK_K": 64, 
-            "NUM_PROGRAMS": get_gpu_sm_count(), 
-            "num_warps": 8, 
-            "num_stages": 4
-        }
-        func = m_grouped_glu_interleaved_persistent_kernel
-    elif autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_m_grouped_glu_interleaved_persistent_kernel
-    elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_m_grouped_glu_interleaved_persistent_kernel
-
+    
     if params.gather:
         out_rows = num_tokens * params.topk
     else:
@@ -180,8 +214,17 @@ def m_grouped_glu_interleaved(
 
     out = torch.empty((out_rows, n // 2), device=token.device, dtype=token.dtype)
     
+    default_config = m_grouped_glu_interleaved_default_config(params)
+    default_kwargs = default_config.all_kwargs()
+    func = m_grouped_glu_interleaved_persistent_kernel
+    if autotune_mode == AutotuneMode.FAST:
+        func = _fast_autotune_m_grouped_glu_interleaved_persistent_kernel
+        default_kwargs = {}
+    elif autotune_mode == AutotuneMode.MAX:
+        func = _max_autotune_m_grouped_glu_interleaved_persistent_kernel
+        default_kwargs = {}
+    
     grid = lambda META: (META["NUM_PROGRAMS"],)
-
     func[grid](
         token, 
         token.stride(),

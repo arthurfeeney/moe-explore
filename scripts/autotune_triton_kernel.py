@@ -4,6 +4,7 @@ configuratios, so autotuning doesn't have to be run every time.
 """
 
 import argparse
+from dataclasses import dataclass
 import math
 import torch
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
@@ -14,6 +15,38 @@ from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import random_routing
 
 import os
+
+def autotune_grouped_gemm(
+    num_tokens,
+    num_experts,
+    K,
+    N,
+    topk,
+    dtype
+):
+    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    p = get_token_indices(
+        topk_indices.view(-1),
+        topk,
+        num_experts,
+        zero_prefix=True
+    )   
+
+    params = MGroupedGEMMParams(
+        weight,
+        p.group_indices,
+        permute_indices=None,
+        gather=False,
+        scatter=False,
+        num_tokens=num_tokens,
+        topk=topk,
+        scales=None,
+    )
+    
+    m_grouped_gemm(input, params, AutotuneMode.MAX)
+
 
 def autotune_grouped_gemm_gather(
     num_tokens,
@@ -44,7 +77,7 @@ def autotune_grouped_gemm_gather(
         None
     )
     
-    m_grouped_gemm(input, params, AutotuneMode.FAST)
+    m_grouped_gemm(input, params, AutotuneMode.MAX)
     
 def autotune_grouped_gemm_scatter(
     num_tokens_times_topk,
@@ -144,26 +177,49 @@ def autotune_grouped_glu_interleaved_gather(
     
     m_grouped_glu_interleaved(input, params, AutotuneMode.MAX)
     
+@dataclass
+class MoESettings:
+    num_experts: int
+    N: int
+    K: int
+    topk: int
+
+def qwen_settings(kenrel_type: str):
+    if kenrel_type in ("grouped", "gather", "glu-gather", "glu-interleaved-gather"):
+        N, K = 768, 2048
+    elif kenrel_type == "scatter":
+        N, K = 2048, 768
+    return MoESettings(
+        num_experts=128,
+        N=N,
+        K=K,
+        topk=8
+    )
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--kernel", 
         type=str, 
         required=True, 
-        choices=["gather", "scatter", "glu-gather", "glu-interleaved-gather"])
+        choices=["grouped", "gather", "scatter", "glu-gather", "glu-interleaved-gather"])
     parser.add_argument("--num-tokens", type=int, required=True)
+    parser.add_argument("--model", type=str, required=True, choices=["qwen"])
     args = parser.parse_args()
 
     os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
     num_tokens = args.num_tokens
-    num_experts = 128
-    K = 2048
-    N = 768
-    topk = 8
+    q = qwen_settings(args.kernel)
+    num_experts = q.num_experts
+    N = q.N
+    K = q.K
+    topk = q.topk
     dtype = torch.bfloat16
     
-    if args.kernel == "gather":
+    if args.kernel == "grouped":
+        autotune_grouped_gemm(num_tokens, num_experts, K, N, topk, dtype)
+    elif args.kernel == "gather":
         autotune_grouped_gemm_gather(num_tokens, num_experts, K, N, topk, dtype)
     elif args.kernel == "scatter":
         autotune_grouped_gemm_scatter(num_tokens, num_experts, K, N, topk, dtype)
@@ -171,6 +227,6 @@ def main():
         autotune_grouped_glu_gather(num_tokens, num_experts, K, N, topk, dtype)
     elif args.kernel == "glu-interleaved-gather":
         autotune_grouped_glu_interleaved_gather(num_tokens, num_experts, K, N, topk, dtype)
-        
+
 if __name__ == "__main__":
     main()

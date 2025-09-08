@@ -33,25 +33,26 @@ def generate_configs(params: List[AutotuneParam]):
     return configs
 
 def fast_autotune_configs(persistent: bool):
-    block_sizes = [64, 128]
-    block_m = AutotuneParam("BLOCK_M", block_sizes)
-    block_n = AutotuneParam("BLOCK_N", block_sizes)
-    block_k = AutotuneParam("BLOCK_K", block_sizes)
-    params = [block_m, block_n, block_k]
+    block_m = AutotuneParam("BLOCK_M", [128])
+    block_n = AutotuneParam("BLOCK_N", [128, 256])
+    block_k = AutotuneParam("BLOCK_K", [32, 64])
+    num_warps = AutotuneParam("num_warps", [4, 8])
+    num_stages = AutotuneParam("num_stages", [4])
+    params = [block_m, block_n, block_k, num_warps, num_stages]
     if persistent:
         params.append(AutotuneParam("NUM_PROGRAMS", [get_gpu_sm_count()]))
     return generate_configs(params)
-    
+
 def max_autotune_configs(persistent: bool):
     block_sizes = [64, 128, 256]
     block_m = AutotuneParam("BLOCK_M", block_sizes)
     block_n = AutotuneParam("BLOCK_N", block_sizes)
-    block_k = AutotuneParam("BLOCK_K", block_sizes)
-    num_warps = AutotuneParam("num_warps", [4, 8])
-    num_stages = AutotuneParam("num_stages", [3, 4])
+    block_k = AutotuneParam("BLOCK_K", [32, 64])
+    num_warps = AutotuneParam("num_warps", [4, 8, 16])
+    num_stages = AutotuneParam("num_stages", [3, 4, 5])
     params = [block_m, block_n, block_k, num_warps, num_stages]
     if persistent:
         sm_count = get_gpu_sm_count()
-        num_programs = [sm_count // 2, sm_count, sm_count * 2]
+        num_programs = [sm_count]
         params.append(AutotuneParam("NUM_PROGRAMS", num_programs))
     return generate_configs(params)
