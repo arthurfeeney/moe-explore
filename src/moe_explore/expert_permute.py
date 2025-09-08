@@ -3,6 +3,7 @@ from typing import Union, Tuple
 from dataclasses import dataclass
 import triton.profiler as proton
 from moe_explore.triton_kernels.row_gather_scatter import row_gather, row_scatter
+from moe_explore.functional.scale_and_reduce import scale_and_reduce
 
 @dataclass
 class GroupedTokens:
@@ -39,7 +40,7 @@ def get_token_indices(
         indices=indices
     )
 
-#@torch.compile(dynamic=True)
+@torch.compile
 def expert_input_permute(
     tokens: torch.Tensor, 
     expert_indices: torch.Tensor, 
@@ -47,7 +48,6 @@ def expert_input_permute(
     topk: int
 ) -> GroupedTokens:
     indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=True)
-    token_dim = tokens.size(1)
     output = row_gather(tokens, indices.indices // topk)
     return GroupedTokens(
         tokens=output,
@@ -55,8 +55,7 @@ def expert_input_permute(
         indices=indices.indices 
     )
 
-# TODO: This seems faster without torch.compile
-@torch.compiler.disable()
+@torch.compile
 def expert_output_permute(
     grouped_tokens: GroupedTokens,
     expert_scores: torch.Tensor,
@@ -66,4 +65,4 @@ def expert_output_permute(
     with proton.scope("scatter"):
         tokens = row_scatter(grouped_tokens.tokens, grouped_tokens.indices)
     with proton.scope("scale-and-reduce"):
-        return torch.einsum("tkd,tk->td", tokens.view(-1, topk, tokens.size(1)), expert_scores)
+        return scale_and_reduce(tokens, expert_scores, expert_scores.size(0), topk, tokens.size(1))

@@ -14,8 +14,8 @@ def torch_grouped_matmul_gather_scatter(
     fused gather / scatter-reduce operation.
     """
     dtype = a.dtype
-    a = a#.to(torch.float32)
-    b = params.weight#.to(torch.float32)
+    a = a
+    b = params.weight
     group_indices = params.group_indices
     gather_indices = params.permute_indices // params.topk if params.gather else None
     scatter_indices = params.permute_indices if params.scatter else None
@@ -33,7 +33,7 @@ def torch_grouped_matmul_gather_scatter(
             a_gather = torch.gather(a, dim=0, index=index)
         else:
             a_gather = a[glo:ghi]
-            
+
         prod = a_gather @ b[i]
         if params.scatter:
             c[scatter_indices[glo:ghi]] = prod
@@ -88,6 +88,19 @@ def torch_grouped_glu(
          
     return c
 
+def perfect_groups(num_tokens: int, num_experts: int, device: torch.device):
+    r"""
+    This generates a perfectly balanced groups, where each group gets an equal number of tokens.
+    """
+    assert num_tokens % num_experts == 0
+    indices = torch.arange(0, num_tokens, num_tokens // num_experts, device=device)
+    return indices
+
+def perfect_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):
+    r"""
+    This generates a perfectly balanced routing, where each expert gets an equal number of tokens.
+    """
+    
 def random_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):
     r"""
     This generates a random routing with the routing logies selected from a normal distribution.
