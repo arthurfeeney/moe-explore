@@ -9,4 +9,4 @@ ncu -o profile.ncu-rep \
   --profile-from-start no \
   --import-source yes \
   --set full \
-  python bench/profile_functional.py
+  python bench/profile_ncu.py

@@ -23,7 +23,7 @@ try:
     HAVE_SCATTERMOE = True
 except ImportError:
     HAVE_SCATTERMOE = False
-     
+
 def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     r""" This computes the flops of a GLU forward pass. Flops are counted separately,
     so an FMA is counted as two flops.
@@ -41,14 +41,14 @@ def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     return flop_per_sec
 
 def moe_benchmark(plot_name, model_name, num_experts, act_experts, hidden_dim, input_dim, activation):
-    line_vals = ["torch", "grouped_gemm", "fused"]
-    line_names = ["Torch", "Grouped GLU", "Fused GLU"]
+    line_vals = ["torch", "grouped_gemm", "fused", "nested_tensor"]
+    line_names = ["Torch", "Grouped GLU", "Fused GLU", "Nested Tensor"]
     if HAVE_SCATTERMOE:
         line_vals.append("scattermoe")
         line_names.append("ScatterMoE")
     return Benchmark(
         x_names=["seq_len"],
-        x_vals=[64, 128, 256, 512, 1024, 2048, 4096],
+        x_vals=[64, 128, 256, 512, 1024],
         line_arg="provider",
         line_vals=line_vals,
         line_names=line_names,
@@ -102,22 +102,6 @@ configs.append(
             activation="silu"
         ))
 
-for num_experts in [8, 16, 32, 64, 128, 256, 512]:
-    for input_dim in [512, 1024, 2048]:
-        for hidden_dim in [512, 768, 1024, 1536]:
-            for act_experts in [2, 4, 6, 8]:
-                configs.append(
-                    moe_benchmark(
-                        f"Test-num_experts={num_experts}-input={input_dim}-hidden={hidden_dim}-k={act_experts}",
-                        model_name="test",
-                        num_experts=num_experts,
-                        act_experts=act_experts,
-                        input_dim=input_dim,
-                        hidden_dim=hidden_dim,
-                        activation="silu"
-                    )
-                )
-
 @perf_report(configs)
 def benchmark_moe_forward(
     model_name,
@@ -129,6 +113,8 @@ def benchmark_moe_forward(
     seq_len, 
     provider
 ):
+    torch.manual_seed(0)
+    
     if model_name == "ernie4":
         router = ernie_router
         router_params = random_ernie_router(
@@ -167,7 +153,7 @@ def benchmark_moe_forward(
     input = torch.randn((seq_len, input_dim), device=torch.device("cuda"), dtype=torch.bfloat16)
 
     quantiles = [0.5, 0.2, 0.8]
-    autotune_mode = AutotuneMode.NONE
+    autotune_mode = AutotuneMode.FAST
     if provider == "torch":
         ms, min_ms, max_ms = do_bench(lambda: moe_glu_torch(input, moe_params, autotune_mode), quantiles=quantiles)
     elif provider == "grouped_gemm":
@@ -175,6 +161,7 @@ def benchmark_moe_forward(
     elif provider == "fused":
         ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm_fused(input, moe_params, autotune_mode), quantiles=quantiles)
     # Ernie4 forces the router to always use float32, scattermoe impl doesn't do that.
+    # So we pass in the router. 
     elif provider == "scattermoe":
         glu = ScatterMoEGLU(
             input_size=input_dim, 
