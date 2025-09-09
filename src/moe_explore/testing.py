@@ -88,18 +88,15 @@ def torch_grouped_glu(
          
     return c
 
-def perfect_groups(num_tokens: int, num_experts: int, device: torch.device):
-    r"""
-    This generates a perfectly balanced groups, where each group gets an equal number of tokens.
-    """
-    assert num_tokens % num_experts == 0
-    indices = torch.arange(0, num_tokens, num_tokens // num_experts, device=device)
-    return indices
-
 def perfect_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):
     r"""
     This generates a perfectly balanced routing, where each expert gets an equal number of tokens.
+    This is useful for comparing performance with a batched GEMM.
     """
+    assert num_tokens % num_experts == 0
+    indices = torch.arange(0, num_tokens * topk, device=device) % num_experts
+    topk_scores, _ = random_routing(num_tokens, num_experts, topk, device, dtype)
+    return topk_scores, indices
     
 def random_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):
     r"""
