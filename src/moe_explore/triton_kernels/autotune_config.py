@@ -44,13 +44,14 @@ def fast_autotune_configs(persistent: bool):
     return generate_configs(params)
 
 def max_autotune_configs(persistent: bool):
-    block_sizes = [64, 128, 256]
+    block_sizes = [32, 64, 128, 256]
     block_m = AutotuneParam("BLOCK_M", block_sizes)
     block_n = AutotuneParam("BLOCK_N", block_sizes)
-    block_k = AutotuneParam("BLOCK_K", [32, 64])
+    block_k = AutotuneParam("BLOCK_K", [32, 64, 128])
+    group_sizes = AutotuneParam("GROUP_M", [0, 4, 6, 8])
     num_warps = AutotuneParam("num_warps", [4, 8, 16])
     num_stages = AutotuneParam("num_stages", [3, 4, 5])
-    params = [block_m, block_n, block_k, num_warps, num_stages]
+    params = [block_m, block_n, block_k, num_warps, num_stages, group_sizes]
     if persistent:
         sm_count = get_gpu_sm_count()
         num_programs = [sm_count]
