@@ -6,6 +6,7 @@ configuratios, so autotuning doesn't have to be run every time.
 import argparse
 from dataclasses import dataclass
 import math
+import os
 import torch
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
@@ -14,18 +15,17 @@ from moe_explore.triton_kernels.m_grouped_glu_interleaved import m_grouped_glu_i
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import random_routing
 
-import os
-
 def autotune_grouped_gemm(
     num_tokens,
     num_experts,
     K,
     N,
     topk,
-    dtype
+    dtype,
+    dist
 ):
-    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
-    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    input = dist((num_tokens, K), dtype=dtype, device="cuda")
+    weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
     _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
     p = get_token_indices(
         topk_indices.view(-1),
@@ -54,10 +54,11 @@ def autotune_grouped_gemm_gather(
     K,
     N,
     topk,
-    dtype
+    dtype,
+    dist
 ):
-    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
-    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    input = dist((num_tokens, K), dtype=dtype, device="cuda")
+    weight = dist((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
     _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
     p = get_token_indices(
         topk_indices.view(-1),
@@ -85,10 +86,11 @@ def autotune_grouped_gemm_scatter(
     K,
     N,    
     topk,
-    dtype
+    dtype,
+    dist
 ):
-    input = torch.randn((num_tokens_times_topk, K), dtype=dtype, device="cuda")
-    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    input = dist((num_tokens_times_topk, K), dtype=dtype, device="cuda")
+    weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
     
     # this test is setup to implicitly assume that we have already routed `num_tokens`
     # to `num_tokens * topk`. The routing and scales are generated using the original
@@ -121,11 +123,12 @@ def autotune_grouped_glu_gather(
     K,
     N,
     topk,
-    dtype
+    dtype,
+    dist
 ):
-    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
-    gate_weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
-    up_weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    input = dist((num_tokens, K), dtype=dtype, device="cuda")
+    gate_weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
+    up_weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
     _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
     p = get_token_indices(
         topk_indices.view(-1),
@@ -153,10 +156,11 @@ def autotune_grouped_glu_interleaved_gather(
     K,
     N,
     topk,
-    dtype
+    dtype,
+    dist
 ):
-    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
-    weight = torch.randn((num_experts, K, 2 * N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    input = dist((num_tokens, K), dtype=dtype, device="cuda")
+    weight = dist((num_experts, K, 2 * N), dtype=dtype, device="cuda")
     _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
     p = get_token_indices(
         topk_indices.view(-1),
@@ -205,6 +209,11 @@ def main():
         choices=["grouped", "gather", "scatter", "glu-gather", "glu-interleaved-gather"])
     parser.add_argument("--num-tokens", type=int, required=True)
     parser.add_argument("--model", type=str, required=True, choices=["qwen"])
+    parser.add_argument(
+        "--init-dist", 
+        type=str, 
+        required=True,
+        choices=["randn", "zeros"])
     args = parser.parse_args()
 
     os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
@@ -216,17 +225,18 @@ def main():
     K = q.K
     topk = q.topk
     dtype = torch.bfloat16
+    init_dist = torch.randn if args.init_dist == "randn" else torch.zeros
     
     if args.kernel == "grouped":
-        autotune_grouped_gemm(num_tokens, num_experts, K, N, topk, dtype)
+        autotune_grouped_gemm(num_tokens, num_experts, K, N, topk, dtype, init_dist)
     elif args.kernel == "gather":
-        autotune_grouped_gemm_gather(num_tokens, num_experts, K, N, topk, dtype)
+        autotune_grouped_gemm_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist)
     elif args.kernel == "scatter":
-        autotune_grouped_gemm_scatter(num_tokens, num_experts, K, N, topk, dtype)
+        autotune_grouped_gemm_scatter(num_tokens, num_experts, K, N, topk, dtype, init_dist)
     elif args.kernel == "glu-gather":
-        autotune_grouped_glu_gather(num_tokens, num_experts, K, N, topk, dtype)
+        autotune_grouped_glu_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist)
     elif args.kernel == "glu-interleaved-gather":
-        autotune_grouped_glu_interleaved_gather(num_tokens, num_experts, K, N, topk, dtype)
+        autotune_grouped_glu_interleaved_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist)
 
 if __name__ == "__main__":
     main()
