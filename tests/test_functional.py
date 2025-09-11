@@ -3,9 +3,20 @@ import math
 from dataclasses import dataclass
 import pytest
 import torch
+<<<<<<< HEAD
 from moe_explore.functional.topk_moe import (
     topk_moe_forward,
     topk_moe_torch
+=======
+from moe_explore.functional.mlp import (
+    moe_mlp_torch, 
+    moe_mlp_grouped_gemm_fused,
+    moe_mlp_grouped_gemm
+)
+from moe_explore.functional.glu import (
+    moe_glu_torch,
+    moe_glu_grouped_gemm
+>>>>>>> ce57e96 (Remove non-interleaved glu)
 )
 from moe_explore.params import MOEParams
 from moe_explore.testing import random_glu, random_mlp, random_topk_router, assert_close, random_interleaved_glu
@@ -68,5 +79,53 @@ def test_topk_moe(
     )
 
     assert ref_output.isfinite().all()
+<<<<<<< HEAD
     assert output.isfinite().all()
     assert_close(ref_output, output)
+=======
+    assert gg_output.isfinite().all()
+    assert gg_fused_output.isfinite().all()
+    assert_close(ref_output, gg_output)
+    assert_close(ref_output, gg_fused_output)
+
+@pytest.mark.parametrize(
+    "seq_len,input_dim,hidden_dim,activation,num_experts,topk,dtype", test_params)
+def test_moe_glu(
+    seq_len,
+    input_dim,
+    hidden_dim,
+    activation,
+    num_experts,
+    topk,
+    dtype
+):
+    input = torch.randn((seq_len, input_dim), device="cuda", dtype=dtype)
+    moe_params = MOEParams(
+        random_topk_router(
+            num_experts,
+            input_dim,
+            topk,
+            softmax_before_topk=True,
+            normalize_routing=False,
+            device="cuda",
+            dtype=dtype
+        ),
+        random_glu(num_experts, input_dim, hidden_dim, activation, device="cuda", dtype=dtype),
+        num_experts,
+        topk
+    )
+
+    gg_output = moe_glu_grouped_gemm(
+        input,
+        moe_params
+    )
+
+    ref_output = moe_glu_torch(
+        input,
+        moe_params
+    )
+
+    assert ref_output.isfinite().all()
+    assert gg_output.isfinite().all()
+    assert_close(ref_output, gg_output)
+>>>>>>> ce57e96 (Remove non-interleaved glu)

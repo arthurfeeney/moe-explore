@@ -2,7 +2,11 @@ import torch
 import pytest
 import numpy as np
 from moe_explore.hf_moe_reference import olmoe_forward, qwen3_moe_forward, ernie4_5_moe_forward
+<<<<<<< HEAD
 from moe_explore.functional.topk_moe import topk_moe_forward
+=======
+from moe_explore.functional.glu import moe_glu_grouped_gemm, moe_glu_interleaved
+>>>>>>> ce57e96 (Remove non-interleaved glu)
 from transformers import AutoConfig
 from moe_explore.params import MOEParams, MLPParams
 from moe_explore.testing import random_glu, random_topk_router, random_ernie_router, assert_close
@@ -64,9 +68,15 @@ def get_interleave_glu_params(input, moe_params):
     else:
         activation = "swiglu"
     
+<<<<<<< HEAD
     interleaved_glu_params = MLPParams(
         weight1=interleaved_weight,
         weight2=moe_params.expert_params.down_weight,
+=======
+    interleaved_glu_params = GLUInterleavedParams(
+        interleaved_weight=interleaved_weight,
+        down_weight=moe_params.expert_params.down_weight,
+>>>>>>> ce57e96 (Remove non-interleaved glu)
         activation=activation
     )
     moe_params.expert_params = interleaved_glu_params
@@ -86,6 +96,14 @@ def test_huggingface(seq_len, model_name, forward):
         moe_params
     ).squeeze(0)    
 
+<<<<<<< HEAD
+=======
+    gg_output = moe_glu_grouped_gemm(
+        input,
+        moe_params
+    )
+    
+>>>>>>> ce57e96 (Remove non-interleaved glu)
     interleaved_glu_params = get_interleave_glu_params(input, moe_params)
     gg_interleaved_output = topk_moe_forward(
         input,
@@ -93,5 +111,11 @@ def test_huggingface(seq_len, model_name, forward):
     )
 
     assert ref_output.isfinite().all()
+<<<<<<< HEAD
     assert gg_interleaved_output.isfinite().all()
+=======
+    assert gg_output.isfinite().all()
+    assert gg_interleaved_output.isfinite().all()
+    assert_close(ref_output, gg_output)
+>>>>>>> ce57e96 (Remove non-interleaved glu)
     assert_close(ref_output, gg_interleaved_output)
