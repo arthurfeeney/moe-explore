@@ -6,8 +6,6 @@ from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices, expert_input_permute, expert_output_permute
 from moe_explore.params import MOEParams, GLUParams, GLUInterleavedParams
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
-from moe_explore.triton_kernels.m_grouped_glu import m_grouped_glu, MGroupedGLUParams
-from moe_explore.triton_kernels.m_grouped_glu_interleaved import m_grouped_glu_interleaved, MGroupedGLUInterleavedParams
 
 @torch.compile
 def moe_glu_torch(
@@ -48,55 +46,6 @@ def moe_glu_torch(
                 )
         return expert_cache
 
-def moe_glu_grouped_gemm_fused(
-    input: torch.Tensor,
-    params: MOEParams,
-    autotune_mode = None
-):
-    num_tokens = input.size(0)
-    ep: MGroupedGLUParams = params.expert_params
-    with proton.scope("router"):
-        topk_scores, topk_indices = router(input, params.router_params)
-    with proton.scope("get_token_indices"):
-        perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
-
-    with proton.scope("fused_grouped_glu"):
-        glu_params = MGroupedGLUParams(
-            ep.gate_weight,
-            ep.up_weight,
-            perm_to_group_indices.group_indices,
-            perm_to_group_indices.indices,
-            gather=True,
-            num_tokens=num_tokens,
-            topk=params.topk,
-            activation=ep.activation
-        )
-        
-        gated = m_grouped_glu(input, glu_params, autotune_mode=autotune_mode)
-        
-    with proton.scope("grouped_gemm"):
-        down_params = MGroupedGEMMParams(
-            ep.down_weight,
-            perm_to_group_indices.group_indices,
-            perm_to_group_indices.indices,
-            gather=False,
-            scatter=True,
-            num_tokens=num_tokens,
-            topk=params.topk,
-            scales=topk_scores
-        )
-
-        down = m_grouped_gemm(
-            gated,
-            down_params,
-            autotune_mode=autotune_mode
-        )
-            
-    with proton.scope("scale_and_reduce"):
-        down = scale_and_reduce(down, down_params.scales, down_params.num_tokens, params.topk, down.size(-1))
-
-    return down
-
 def moe_glu_interleaved(
     input: torch.Tensor,
     params: MOEParams,
@@ -109,16 +58,18 @@ def moe_glu_interleaved(
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
         
     with proton.scope("fused_grouped_glu"):
-        glu_params = MGroupedGLUInterleavedParams(
+        glu_params = MGroupedGEMMParams(
             ep.interleaved_weight,
             perm_to_group_indices.group_indices,
             perm_to_group_indices.indices,
             gather=True,
+            scatter=False,
             num_tokens=input.size(0),
             topk=params.topk,
+            scales=None,
             activation=ep.activation
         )
-        glu = m_grouped_glu_interleaved(input, glu_params, autotune_mode=autotune_mode)
+        glu = m_grouped_gemm(input, glu_params, autotune_mode=autotune_mode)
         
     with proton.scope("down_grouped_gemm"):
         down_params = MGroupedGEMMParams(

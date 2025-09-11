@@ -10,7 +10,6 @@ from moe_explore.functional.mlp import (
 )
 from moe_explore.functional.glu import (
     moe_glu_torch,
-    moe_glu_grouped_gemm_fused,
     moe_glu_grouped_gemm
 )
 from moe_explore.params import MOEParams
@@ -104,11 +103,6 @@ def test_moe_glu(
         topk
     )
 
-    gg_fused_output = moe_glu_grouped_gemm_fused(
-        input,
-        moe_params
-    )
-
     gg_output = moe_glu_grouped_gemm(
         input,
         moe_params
@@ -121,6 +115,4 @@ def test_moe_glu(
 
     assert ref_output.isfinite().all()
     assert gg_output.isfinite().all()
-    assert gg_fused_output.isfinite().all()
     assert_close(ref_output, gg_output)
-    assert_close(ref_output, gg_fused_output)
