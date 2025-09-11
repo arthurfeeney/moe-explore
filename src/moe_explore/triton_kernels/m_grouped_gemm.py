@@ -3,8 +3,9 @@ from functools import partial
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
+from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
+from .activation import TRITON_ACTIVATIONS
 from .autotune_config import (
     AutotuneMode, 
     fast_autotune_configs, 
@@ -25,6 +26,7 @@ class MGroupedGEMMParams:
     num_tokens: int
     topk: int
     scales: Optional[torch.Tensor]
+    activation: Optional[Callable] = None
 
 @triton.jit
 def m_grouped_gemm_inner(
@@ -51,30 +53,35 @@ def m_grouped_gemm_inner(
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
     NUM_PROGRAMS: tl.constexpr,
-    GROUP_M: tl.constexpr
+    GROUP_M: tl.constexpr,
+    EPILOGUE: tl.constexpr,
+    EPILOGUE_SPLIT: tl.constexpr,
+    DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
+    USE_TENSOR_DESCRIPTOR: tl.constexpr
 ):
     MASK_N: tl.constexpr = N % BLOCK_N != 0
     MASK_K: tl.constexpr = K % BLOCK_K != 0
     
     num_m_tiles = tl.cdiv(m, BLOCK_M)
     num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)
-    
-    # On 3.4.0, potential compiler bug. triton doesn't like multiplying
-    # the group size with the num_n_tiles. Going through another
-    # variable, group_m, gets it to compile. It also doesn't work
-    # to manually inline the group size...!
-    group_m = GROUP_M
-    num_tiles_in_group: tl.constexpr = group_m * num_n_tiles
-    
+        
     num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
     while tile_id >= last_problem_end and tile_id < last_problem_end + num_tiles:
         tile_id_in_gemm = tile_id - last_problem_end
+        tile_id_m = tile_id_in_gemm // num_n_tiles
+        tile_id_n = tile_id_in_gemm % num_n_tiles
         
         # If GROUP_M is 0, don't do tile reordering.
         if GROUP_M == 0:
             tile_m_idx = (tile_id_in_gemm // num_n_tiles) * BLOCK_M
             tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
         else:
+            # On 3.4.0, working around two potential compiler bugs. 
+            # 1. triton doesn't like multiplying the group size with the num_n_tiles. Going through another
+            # variable, group_m, gets it to compile. It also doesn't work to manually inline a group size.
+            # 2. replacing with tl.swizzle2d hits a "failures [...] while processing an MLIR pass pipeline" 
+            group_m = GROUP_M
+            num_tiles_in_group = group_m * num_n_tiles
             group_id = tile_id_in_gemm // num_tiles_in_group
             first_id_m = group_id * group_m
             group_size_m = min(num_m_tiles - first_id_m, group_m)
@@ -83,19 +90,13 @@ def m_grouped_gemm_inner(
         
         tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
         tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
-        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets, BLOCK_M), BLOCK_M)
-        tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets, BLOCK_N), BLOCK_N)
+        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % m, BLOCK_M), BLOCK_M)
+        tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets % N, BLOCK_N), BLOCK_N)
         
-        if MASK_N:
-            n_mask = tile_n_offsets < N
-
-        token_mask = start_idx + tile_m_offsets < end_idx
-
         if GATHER_ROWS or SCATTER_ROWS:
-            permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets,
-                                            mask=token_mask, 
-                                            other=0,
-                                            cache_modifier=".ca")
+            # Can avoid masking, since oversets are 0 <= tile_m_offsets < m
+            permute_token_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)
+            
         if GATHER_ROWS:
             token_indices = permute_token_indices // TOPK
         else:
@@ -107,22 +108,36 @@ def m_grouped_gemm_inner(
         token_col_offsets = k_offset * token_strides[1]
         token_ptrs = token_ptr + token_row_offsets[:, None] + token_col_offsets
 
-        weight_problem_offset = problem_id * weight_strides[0]
-        weight_row_offsets = k_offset[:, None] * weight_strides[1]
-        weight_col_offsets = tile_n_offsets * weight_strides[2]
-        weight_ptrs = weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
+        if USE_TENSOR_DESCRIPTOR:
+            weight_desc = tl.make_tensor_descriptor(
+                weight_ptr + problem_id * weight_strides[0],
+                shape=(K, N),
+                strides=(weight_strides[1], weight_strides[2]),
+                block_shape=(BLOCK_K, BLOCK_N)
+            )
+        else:
+            weight_problem_offset = problem_id * weight_strides[0]
+            weight_row_offsets = k_offset[:, None] * weight_strides[1]
+            weight_col_offsets = tile_n_offsets * weight_strides[2]
+            weight_ptrs = weight_ptr + weight_problem_offset + weight_row_offsets + weight_col_offsets
+        
+        if MASK_N:
+            n_mask = tile_n_offsets < N
+
+        token_mask = start_idx + tile_m_offsets < end_idx
         
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
-        for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
+        for k in tl.range(0, tl.cdiv(K, BLOCK_K), disallow_acc_multi_buffer=DISALLOW_ACC_MULTI_BUFFER):
             tl.multiple_of(token_ptrs, [16, 16])
             tl.multiple_of(weight_ptrs, [16, 16])
             
+            k_remaining = K - k * BLOCK_K
             if MASK_K and MASK_N:
-                a_block = tl.load(token_ptrs, mask=token_mask[:, None] & (k_offset < K - k * BLOCK_K), other=0.0)
-                b_block = tl.load(weight_ptrs, mask=n_mask[None, :] & (k_offset[:, None] < K - k * BLOCK_K), other=0.0)
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None] & (k_offset < k_remaining), other=0.0)
+                b_block = tl.load(weight_ptrs, mask=n_mask[None, :] & (k_offset[:, None] < k_remaining), other=0.0)
             elif MASK_K:
-                a_block = tl.load(token_ptrs, mask=token_mask[:, None] & (k_offset < K - k * BLOCK_K), other=0.0)
-                b_block = tl.load(weight_ptrs, mask=k_offset[:, None] < K - k * BLOCK_K, other=0.0)
+                a_block = tl.load(token_ptrs, mask=token_mask[:, None] & (k_offset < k_remaining), other=0.0)
+                b_block = tl.load(weight_ptrs, mask=k_offset[:, None] < k_remaining, other=0.0)
             elif MASK_N:
                 a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
                 b_block = tl.load(weight_ptrs, mask=n_mask[None, :], other=0.0)
@@ -130,34 +145,52 @@ def m_grouped_gemm_inner(
                 a_block = tl.load(token_ptrs, mask=token_mask[:, None], other=0.0)
                 b_block = tl.load(weight_ptrs)
                 
-            acc = tl.dot(a_block, b_block, acc=acc) 
+            acc = tl.dot(a_block, b_block, acc=acc)
             token_ptrs += BLOCK_K * token_strides[1]
             weight_ptrs += BLOCK_K * weight_strides[1]
 
-        acc = tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2))
-        acc = tl.permute(acc, (0, 2, 1))
-        acc0, acc1 = tl.split(acc)
+        tl.static_assert(EPILOGUE_SPLIT == 1 or EPILOGUE_SPLIT == 2, "EPILOGUE_SPLIT must be 1 or 2")
+        if EPILOGUE_SPLIT == 2:
+            acc = tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2))
+            acc = tl.permute(acc, (0, 2, 1))
+            acc0, acc1 = tl.split(acc)
+            accs = (acc0, acc1)
+        else:
+            accs = (acc,)
+        
+        for i in tl.static_range(len(accs)):
+            if EPILOGUE is not None:
+                accs[i] = EPILOGUE(accs[i])
 
-        tile_n_offsets0 = tile_n_idx + tl.arange(0, BLOCK_N // 2)
-        tile_n_offsets1 = tile_n_offsets0 + BLOCK_N // 2
-        tile_n_offsets0 = tl.max_contiguous(tl.multiple_of(tile_n_offsets0, BLOCK_N // 2), BLOCK_N // 2)
-        tile_n_offsets1 = tl.max_contiguous(tl.multiple_of(tile_n_offsets1, BLOCK_N // 2), BLOCK_N // 2)
-
+        # The accumulators are all the same size, but the EPILOGUE may change the 
+        # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
+       # tile_n_idx = (tile_id_in_gemm % num_n_tiles) * accs[0].shape[1] * EPILOGUE_SPLIT
+        out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
+        
         if SCATTER_ROWS:         
-            out_offsets = permute_token_indices[:, None] * out_strides[0] + tile_n_offsets0 * out_strides[1]
+            out_offsets = permute_token_indices[:, None] * out_strides[0] + out_tile_n_offsets * out_strides[1]
             out_ptrs = out_ptr + out_offsets
         else:
             out_row_offsets = start_idx + tile_m_offsets
-            out_offsets = out_row_offsets[:, None] * out_strides[0] + tile_n_offsets0 * out_strides[1]
+            out_offsets = out_row_offsets[:, None] * out_strides[0] + out_tile_n_offsets * out_strides[1]
             out_ptrs = out_ptr + out_offsets
 
-        if MASK_N:
-            tl.store(out_ptrs, acc0, mask=token_mask[:, None] & (tile_n_offsets0 < N), cache_modifier=".cs")
-            tl.store(out_ptrs + (BLOCK_N // 2) * out_strides[1], acc1, mask=token_mask[:, None] & (tile_n_offsets1 < N), cache_modifier=".cs")
-        else:
-            tl.store(out_ptrs, acc0, mask=token_mask[:, None], cache_modifier=".cs")
-            tl.store(out_ptrs + (BLOCK_N // 2) * out_strides[1], acc1, mask=token_mask[:, None], cache_modifier=".cs")
-        
+        for i in tl.static_range(len(accs)):
+            out = accs[i]
+            EPILOGUE_SPLIT_STEP = i * out.shape[1]
+            if MASK_N:
+                tl.store(
+                    out_ptrs + EPILOGUE_SPLIT_STEP * out_strides[1], 
+                    out, 
+                    mask=token_mask[:, None] & (out_tile_n_offsets + EPILOGUE_SPLIT_STEP < N), 
+                    cache_modifier=".cs")
+            else:
+                tl.store(
+                    out_ptrs + EPILOGUE_SPLIT_STEP * out_strides[1], 
+                    out, 
+                    mask=token_mask[:, None], 
+                    cache_modifier=".cs")
+
         tile_id += NUM_PROGRAMS
     return tile_id, num_tiles
 
@@ -184,6 +217,10 @@ def m_grouped_gemm_persistent_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
+    EPILOGUE: tl.constexpr,
+    EPILOGUE_SPLIT: tl.constexpr,
+    DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
+    USE_TENSOR_DESCRIPTOR: tl.constexpr
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -197,15 +234,15 @@ def m_grouped_gemm_persistent_kernel(
     tl.assume(out_strides[0] > 0)
     tl.assume(out_strides[1] > 0)
 
-    for problem_id in tl.range(0, E, flatten=True):
+    start_idx = 0
+    for problem_id in tl.range(0, E):
         end_idx = tl.load(group_indices_ptr + problem_id + 1, cache_modifier=".ca")
-        start_idx = tl.load(group_indices_ptr + problem_id, cache_modifier=".ca")
         m = end_idx - start_idx
         
         tl.assume(start_idx >= 0)
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
-        tl.assume(m <= NUM_TOKENS)
+        tl.assume(m <= NUM_TOKENS * TOPK)
         
         tile_id, num_tiles = m_grouped_gemm_inner(
             token_ptr,
@@ -231,9 +268,14 @@ def m_grouped_gemm_persistent_kernel(
             GATHER_ROWS,
             SCATTER_ROWS,
             NUM_PROGRAMS,
-            GROUP_M
+            GROUP_M,
+            EPILOGUE,
+            EPILOGUE_SPLIT,
+            DISALLOW_ACC_MULTI_BUFFER,
+            USE_TENSOR_DESCRIPTOR
         )
-
+        
+        start_idx = end_idx
         last_problem_end += num_tiles 
 
 _fast_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
@@ -261,7 +303,10 @@ def m_grouped_gemm_default_config(params):
                 "BLOCK_N": BLOCK_N, 
                 "BLOCK_K": BLOCK_K, 
                 "NUM_PROGRAMS": get_gpu_sm_count(),
-                "GROUP_M": 6
+                "GROUP_M": 6,
+                "EPILOGUE_SPLIT": 2,
+                "DISALLOW_ACC_MULTI_BUFFER": False,
+                "USE_TENSOR_DESCRIPTOR": False,
             },
             num_warps=8, 
             num_stages=4
@@ -270,12 +315,15 @@ def m_grouped_gemm_default_config(params):
         default_config = triton.Config({
                 "BLOCK_M": BLOCK_M, 
                 "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
+                "BLOCK_K": 64, 
                 "NUM_PROGRAMS": get_gpu_sm_count(),
-                "GROUP_M": 8
+                "GROUP_M": 6,
+                "EPILOGUE_SPLIT": 2,
+                "DISALLOW_ACC_MULTI_BUFFER": False,
+                "USE_TENSOR_DESCRIPTOR": False,
             },
             num_warps=8, 
-            num_stages=5
+            num_stages=4
         )
     elif params.scatter:
         default_config = triton.Config({
@@ -283,7 +331,10 @@ def m_grouped_gemm_default_config(params):
                 "BLOCK_N": BLOCK_N, 
                 "BLOCK_K": BLOCK_K, 
                 "NUM_PROGRAMS": get_gpu_sm_count(),
-                "GROUP_M": 6
+                "GROUP_M": 6,
+                "EPILOGUE_SPLIT": 2,
+                "DISALLOW_ACC_MULTI_BUFFER": False,
+                "USE_TENSOR_DESCRIPTOR": False,
             },
             num_warps=8, 
             num_stages=4
@@ -310,8 +361,12 @@ def m_grouped_gemm(
         out_rows = num_tokens * params.topk
     else:
         out_rows = num_tokens
-
-    out = torch.empty((out_rows, n), device=token.device, dtype=token.dtype)
+        
+    out_cols = n
+    if params.activation is not None and "glu" in params.activation:
+        out_cols //= 2
+        
+    out = torch.empty((out_rows, out_cols), device=token.device, dtype=token.dtype)
 
     default_config = m_grouped_gemm_default_config(params)
     default_kwargs = default_config.all_kwargs()
@@ -323,8 +378,10 @@ def m_grouped_gemm(
         func = _max_autotune_m_grouped_gemm_persistent_kernel
         default_kwargs = {}
         
+    epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
+        
     grid = lambda META: (META["NUM_PROGRAMS"],)
-    
+        
     func[grid](
         token, 
         token.stride(),
@@ -342,6 +399,7 @@ def m_grouped_gemm(
         TOPK=params.topk,
         GATHER_ROWS=params.gather,
         SCATTER_ROWS=params.scatter,
+        EPILOGUE=epilogue,
         **default_kwargs
     )
 

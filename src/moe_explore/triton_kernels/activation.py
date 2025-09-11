@@ -21,8 +21,25 @@ def gelu(x: tl.tensor):
     SQRT_1_DIV_2: tl.constexpr = 0.70710678118654752440
     return x * 0.5 * (1 + tl.erf(x * SQRT_1_DIV_2))
 
+@triton.jit
+def swiglu(tile):
+    tile = tl.reshape(tile, (tile.shape[0], tile.shape[1] // 2, 2))
+    tile0, tile1 = tl.split(tile)
+    tile0 = silu(tile0)
+    return tile0 * tile1
+    
+@triton.jit
+def geglu(tile):
+    tile = tl.reshape(tile, (tile.shape[0], tile.shape[1] // 2, 2))
+    tile0, tile1 = tl.split(tile)
+    tile0 = gelu(tile0)
+    return tile0 * tile1
+    
 TRITON_ACTIVATIONS = {
+    "none": None,
     "silu": silu,
     "approx_gelu": approx_gelu,
-    "gelu": gelu
+    "gelu": gelu,
+    "swiglu": swiglu,
+    "geglu": geglu
 }
