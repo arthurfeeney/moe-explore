@@ -127,7 +127,77 @@ def autotune_grouped_gemm_scatter(
     )
 
     m_grouped_gemm(input, params, AutotuneMode.MAX)
+<<<<<<< HEAD
         
+=======
+    
+def autotune_grouped_glu_gather(
+    num_tokens,
+    num_experts,
+    K,
+    N,
+    topk,
+    dtype,
+    dist,
+    router_name
+):
+    input = dist((num_tokens, K), dtype=dtype, device="cuda")
+    gate_weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
+    up_weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
+    _, topk_indices = router(router_name, num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    p = get_token_indices(
+        topk_indices.view(-1),
+        topk,
+        num_experts,
+        zero_prefix=True
+    )   
+
+    params = MGroupedGLUParams(
+        gate_weight,
+        up_weight,
+        p.group_indices,
+        p.indices,
+        True,
+        num_tokens,
+        topk,
+        "silu"
+    )
+    
+    m_grouped_glu(input, params, AutotuneMode.MAX)
+    
+def autotune_grouped_glu_interleaved_gather(
+    num_tokens,
+    num_experts,
+    K,
+    N,
+    topk,
+    dtype,
+    dist,
+    router_name
+):
+    input = dist((num_tokens, K), dtype=dtype, device="cuda")
+    weight = dist((num_experts, K, 2 * N), dtype=dtype, device="cuda")
+    _, topk_indices = router(router_name, num_tokens, num_experts, topk, device="cuda", dtype=dtype)
+    p = get_token_indices(
+        topk_indices.view(-1),
+        topk,
+        num_experts,
+        zero_prefix=True
+    )   
+    
+    params = MGroupedGLUInterleavedParams(
+        weight,
+        p.group_indices,
+        p.indices,
+        True,
+        num_tokens,
+        topk,
+        "silu"
+    )
+    
+    m_grouped_glu_interleaved(input, params, AutotuneMode.MAX)
+    
+>>>>>>> 2b6c9f0 (support different router distributions in autotuning scripts)
 @dataclass
 class MoESettings:
     num_experts: int
@@ -197,6 +267,14 @@ def main():
         autotune_grouped_gemm_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
     elif args.kernel == "scatter":
         autotune_grouped_gemm_scatter(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
+<<<<<<< HEAD
         
+=======
+    elif args.kernel == "glu-gather":
+        autotune_grouped_glu_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
+    elif args.kernel == "glu-interleaved-gather":
+        autotune_grouped_glu_interleaved_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
+
+>>>>>>> 2b6c9f0 (support different router distributions in autotuning scripts)
 if __name__ == "__main__":
     main()
