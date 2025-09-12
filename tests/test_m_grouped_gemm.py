@@ -47,10 +47,10 @@ def test_fused_moe(
     
     out = m_grouped_gemm(input, params)
     ref = torch_grouped_matmul_gather_scatter(input, params)
-    
+        
     assert out.isfinite().all() and ref.isfinite().all()
     assert_close(out, ref)
-    
+
 @pytest.mark.parametrize(
     "num_tokens,num_experts,topk,K,N,dtype", 
     [
@@ -141,9 +141,6 @@ def test_fused_moe_scatter(
     out = m_grouped_gemm(input, params)
     out = scale_and_reduce(out, params.scales, params.num_tokens, params.topk, out.size(-1))
     ref = torch_grouped_matmul_gather_scatter(input, params)
-    
-    print(out)
-    print(ref)
-        
+                
     assert out.isfinite().all() and ref.isfinite().all()
     assert_close(out, ref)
