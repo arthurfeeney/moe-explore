@@ -62,6 +62,7 @@ def test_m_grouped_gemm(
     assert out.isfinite().all() and ref.isfinite().all()
     assert_close(out, ref)
 
+<<<<<<< HEAD
 parameters = "num_tokens,num_experts,topk,K,N,activation,dtype"
 test_cases = [
     (10, 4, 2, 128, 128, None, torch.bfloat16),
@@ -73,6 +74,17 @@ test_cases = [
 
 @pytest.mark.parametrize(parameters, test_cases)
 def test_m_grouped_gemm_gather(
+=======
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,topk,K,N,dtype", 
+    [
+        (10, 4, 2, 128, 128, torch.bfloat16),
+        (2000, 32, 4, 512, 512, torch.bfloat16),
+        (2000, 32, 4, 512, 512, torch.float16),
+    ]
+)
+def test_fused_moe_gather(
+>>>>>>> 1d841ae (Slight refactor of m_grouped_gemm, that removes the inner function call.)
     num_tokens: int,
     num_experts: int,
     topk: int,
