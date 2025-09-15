@@ -215,6 +215,18 @@ def qwen_settings(kenrel_type: str):
         topk=8
     )
     
+def olmoe_settings(kenrel_type: str):
+    if kenrel_type in ("grouped", "gather", "glu-gather", "glu-interleaved-gather"):
+        N, K = 1024, 2048
+    elif kenrel_type == "scatter":
+        N, K = 2048, 1024
+    return MoESettings(
+        num_experts=64,
+        N=N,
+        K=K,
+        topk=8
+    )
+    
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -223,7 +235,7 @@ def main():
         required=True, 
         choices=["grouped", "gather", "scatter", "glu-gather", "glu-interleaved-gather"])
     parser.add_argument("--num-tokens", type=int, required=True)
-    parser.add_argument("--model", type=str, required=True, choices=["qwen"])
+    parser.add_argument("--model", type=str, required=True, choices=["qwen", "olmoe"])
     parser.add_argument(
         "--init-dist", 
         type=str, 
@@ -236,7 +248,10 @@ def main():
     torch.manual_seed(0)
 
     num_tokens = args.num_tokens
-    q = qwen_settings(args.kernel)
+    if args.model == "qwen":
+        q = qwen_settings(args.kernel)
+    elif args.model == "olmoe":
+        q = olmoe_settings(args.kernel)
     num_experts = q.num_experts
     N = q.N
     K = q.K
