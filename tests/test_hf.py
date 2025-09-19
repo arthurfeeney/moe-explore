@@ -2,9 +2,9 @@ import torch
 import pytest
 import numpy as np
 from moe_explore.hf_moe_reference import olmoe_forward, qwen3_moe_forward, ernie4_5_moe_forward
-from moe_explore.functional.glu import moe_glu_grouped_gemm, moe_glu_interleaved
+from moe_explore.functional.topk_moe import topk_moe_forward
 from transformers import AutoConfig
-from moe_explore.params import MOEParams, GLUInterleavedParams
+from moe_explore.params import MOEParams, MLPParams
 from moe_explore.testing import random_glu, random_topk_router, random_ernie_router, assert_close
 
 OLMOE = "allenai/OLMoE-1B-7B-0924"
@@ -64,19 +64,17 @@ def get_interleave_glu_params(input, moe_params):
     else:
         activation = "swiglu"
     
-    interleaved_glu_params = GLUInterleavedParams(
-        interleaved_weight=interleaved_weight,
-        down_weight=moe_params.expert_params.down_weight,
+    interleaved_glu_params = MLPParams(
+        weight1=interleaved_weight,
+        weight2=moe_params.expert_params.down_weight,
         activation=activation
     )
     moe_params.expert_params = interleaved_glu_params
     return moe_params
 
 @pytest.mark.parametrize(
-    "seq_len,model_name,forward",
-    [
-        (128, OLMOE, olmoe_forward),
-    ])
+    "seq_len,model_name,forward", [(128, OLMOE, olmoe_forward)]
+)
 def test_huggingface(seq_len, model_name, forward):
     config = AutoConfig.from_pretrained(model_name)
     moe_params = hf_config_to_moe_params(config, model_name=model_name)
@@ -88,19 +86,12 @@ def test_huggingface(seq_len, model_name, forward):
         moe_params
     ).squeeze(0)    
 
-    gg_output = moe_glu_grouped_gemm(
-        input,
-        moe_params
-    )
-    
     interleaved_glu_params = get_interleave_glu_params(input, moe_params)
-    gg_interleaved_output = moe_glu_interleaved(
+    gg_interleaved_output = topk_moe_forward(
         input,
         interleaved_glu_params
     )
 
     assert ref_output.isfinite().all()
-    assert gg_output.isfinite().all()
     assert gg_interleaved_output.isfinite().all()
-    assert_close(ref_output, gg_output)
     assert_close(ref_output, gg_interleaved_output)
