@@ -3,7 +3,8 @@ import torch
 import torch.nn.functional as F
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.triton_kernels.m_grouped_gemm import MGroupedGEMMParams
-from moe_explore.params import MLPParams, GLUParams, GLUInterleavedParams, TopkRouterParams, ErnieRouterParams
+from moe_explore.params import MLPParams, GLUParams, TopkRouterParams, ErnieRouterParams
+from moe_explore.functional.activation import activation
 
 def torch_grouped_matmul_gather_scatter(
     a: torch.Tensor,
@@ -40,18 +41,13 @@ def torch_grouped_matmul_gather_scatter(
         else:
             c[glo:ghi] = prod
             
+    if params.activation is not None:
+        c = activation(c, params.activation)
+            
     if params.scatter and params.scales is not None:
         c = scale_and_reduce(c, params.scales, params.num_tokens, params.topk, b.size(-1))
             
     return c.to(dtype)
-
-def activation(x, activation: str):
-    if activation == "silu":
-        return torch.nn.functional.silu(x)
-    elif activation == "gelu":
-        return torch.nn.functional.gelu(x)
-    else:
-        raise ValueError(f"Invalid activation: {activation}")
 
 def torch_grouped_glu(
     a: torch.Tensor,
@@ -304,7 +300,7 @@ def random_interleaved_glu(
     dtype,
     dist=uniform_weight_init,
 ):
-    return GLUInterleavedParams(
+    return MLPParams(
         dist((num_experts, hidden_dim, 2 * intermediate_dim), device=device, dtype=dtype),
         dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
