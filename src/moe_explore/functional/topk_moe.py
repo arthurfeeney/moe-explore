@@ -5,7 +5,7 @@ from moe_explore.functional.activation import activation
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices
-from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
+from moe_explore.functional.m_grouped_gemm import m_grouped_gemm_forward, m_grouped_gemm_backward
 
 def topk_moe_forward(
     input: torch.Tensor,
@@ -19,42 +19,33 @@ def topk_moe_forward(
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
         
     with proton.scope("fused_grouped_glu"):
-        glu_params = MGroupedGEMMParams(
-            perm_to_group_indices.indices,
+        glu = m_grouped_gemm_forward(
+            input,
+            ep.weight1,
+            perm_to_group_indices.group_indices,
+            permute_indices=perm_to_group_indices.indices,
             gather=True,
             scatter=False,
             num_tokens=input.size(0),
             topk=params.topk,
-            scales=None,
             activation=ep.activation
         )
-        glu = m_grouped_gemm(
-            input,
-            ep.weight1,
-            perm_to_group_indices.group_indices,
-            glu_params,
-            autotune_mode=autotune_mode)
         
     with proton.scope("down_grouped_gemm"):
-        down_params = MGroupedGEMMParams(
-            perm_to_group_indices.indices,
+        down = m_grouped_gemm_forward(
+            glu,
+            ep.weight2,
+            perm_to_group_indices.group_indices,
+            permute_indices=perm_to_group_indices.indices,
             gather=False,
             scatter=True,
             num_tokens=input.size(0),
             topk=params.topk,
-            scales=topk_scores
+            activation=None
         )
 
-        down = m_grouped_gemm(
-            glu,
-            ep.weight2,
-            perm_to_group_indices.group_indices,
-            down_params,
-            autotune_mode=autotune_mode
-        )
-        
     with proton.scope("scale_and_reduce"):
-        down = scale_and_reduce(down, down_params.scales, down_params.num_tokens, params.topk, down.size(-1))
+        down = scale_and_reduce(down, topk_scores, input.size(0), params.topk, down.size(-1))
 
     if params.shared_expert_params is not None:
         with proton.scope("shared_expert"):
