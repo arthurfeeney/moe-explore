@@ -2,21 +2,17 @@ import torch
 import pytest
 import numpy as np
 from moe_explore.hf_moe_reference import olmoe_forward, qwen3_moe_forward, ernie4_5_moe_forward
-<<<<<<< HEAD
 from moe_explore.functional.topk_moe import topk_moe_forward
-=======
-from moe_explore.functional.glu import moe_glu_grouped_gemm, moe_glu_interleaved
->>>>>>> ce57e96 (Remove non-interleaved glu)
 from transformers import AutoConfig
 from moe_explore.params import MOEParams, MLPParams
-from moe_explore.testing import random_glu, random_topk_router, random_ernie_router, assert_close
+from moe_explore.testing import random_interleaved_glu, random_ernie_router, random_topk_router, assert_close
 
 OLMOE = "allenai/OLMoE-1B-7B-0924"
 QWEN3 = "Qwen/Qwen3-30B-A3B"
 ERNIE4 = "baidu/ERNIE-4.5-21B-A3B-Base-PT"
 
 def hf_config_to_moe_params(config, model_name):
-    expert_params = random_glu(
+    expert_params = random_interleaved_glu(
         config.num_experts,
         config.hidden_size,
         config.intermediate_size,
@@ -52,35 +48,6 @@ def hf_config_to_moe_params(config, model_name):
             num_experts=config.moe_num_experts,
             topk=config.moe_k,
         )
-        
-def get_interleave_glu_params(input, moe_params):
-    size = (
-        moe_params.num_experts, 
-        moe_params.expert_params.gate_weight.size(1),
-        2 * moe_params.expert_params.gate_weight.size(2)
-    )
-    interleaved_weight = torch.empty(size, device=input.device, dtype=input.dtype)
-    interleaved_weight[:, :, 0::2] = moe_params.expert_params.gate_weight
-    interleaved_weight[:, :, 1::2] = moe_params.expert_params.up_weight
-    
-    if moe_params.expert_params.activation == "gelu":
-        activation = "geglu"
-    else:
-        activation = "swiglu"
-    
-<<<<<<< HEAD
-    interleaved_glu_params = MLPParams(
-        weight1=interleaved_weight,
-        weight2=moe_params.expert_params.down_weight,
-=======
-    interleaved_glu_params = GLUInterleavedParams(
-        interleaved_weight=interleaved_weight,
-        down_weight=moe_params.expert_params.down_weight,
->>>>>>> ce57e96 (Remove non-interleaved glu)
-        activation=activation
-    )
-    moe_params.expert_params = interleaved_glu_params
-    return moe_params
 
 @pytest.mark.parametrize(
     "seq_len,model_name,forward", [(128, OLMOE, olmoe_forward)]
@@ -96,26 +63,12 @@ def test_huggingface(seq_len, model_name, forward):
         moe_params
     ).squeeze(0)    
 
-<<<<<<< HEAD
-=======
-    gg_output = moe_glu_grouped_gemm(
+    #interleaved_glu_params = get_interleave_glu_params(input, moe_params)
+    gg_interleaved_output = topk_moe_forward(
         input,
         moe_params
     )
-    
->>>>>>> ce57e96 (Remove non-interleaved glu)
-    interleaved_glu_params = get_interleave_glu_params(input, moe_params)
-    gg_interleaved_output = topk_moe_forward(
-        input,
-        interleaved_glu_params
-    )
 
     assert ref_output.isfinite().all()
-<<<<<<< HEAD
     assert gg_interleaved_output.isfinite().all()
-=======
-    assert gg_output.isfinite().all()
-    assert gg_interleaved_output.isfinite().all()
-    assert_close(ref_output, gg_output)
->>>>>>> ce57e96 (Remove non-interleaved glu)
     assert_close(ref_output, gg_interleaved_output)

@@ -20,8 +20,6 @@ def topk_moe_forward(
         
     with proton.scope("fused_grouped_glu"):
         glu_params = MGroupedGEMMParams(
-            ep.weight1,
-            perm_to_group_indices.group_indices,
             perm_to_group_indices.indices,
             gather=True,
             scatter=False,
@@ -30,12 +28,15 @@ def topk_moe_forward(
             scales=None,
             activation=ep.activation
         )
-        glu = m_grouped_gemm(input, glu_params, autotune_mode=autotune_mode)
+        glu = m_grouped_gemm(
+            input,
+            ep.weight1,
+            perm_to_group_indices.group_indices,
+            glu_params,
+            autotune_mode=autotune_mode)
         
     with proton.scope("down_grouped_gemm"):
         down_params = MGroupedGEMMParams(
-            ep.weight2,
-            perm_to_group_indices.group_indices,
             perm_to_group_indices.indices,
             gather=False,
             scatter=True,
@@ -46,6 +47,8 @@ def topk_moe_forward(
 
         down = m_grouped_gemm(
             glu,
+            ep.weight2,
+            perm_to_group_indices.group_indices,
             down_params,
             autotune_mode=autotune_mode
         )

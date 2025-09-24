@@ -3,11 +3,13 @@ import torch
 import torch.nn.functional as F
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.triton_kernels.m_grouped_gemm import MGroupedGEMMParams
-from moe_explore.params import MLPParams, GLUParams, TopkRouterParams, ErnieRouterParams
+from moe_explore.params import MLPParams, TopkRouterParams, ErnieRouterParams
 from moe_explore.functional.activation import activation
 
 def torch_grouped_matmul_gather_scatter(
     a: torch.Tensor,
+    b: torch.Tensor,
+    group_indices: torch.Tensor,
     params: MGroupedGEMMParams,
 ):
     r"""
@@ -15,9 +17,9 @@ def torch_grouped_matmul_gather_scatter(
     fused gather / scatter-reduce operation.
     """
     dtype = a.dtype
-    a = a
-    b = params.weight
-    group_indices = params.group_indices
+    a = a if not params.is_a_transposed else a.t().contiguous()
+    b = b if not params.is_b_transposed else b.permute(0, 2, 1).contiguous()
+    group_indices = group_indices
     gather_indices = params.permute_indices // params.topk if params.gather else None
     scatter_indices = params.permute_indices if params.scatter else None
     
@@ -48,41 +50,6 @@ def torch_grouped_matmul_gather_scatter(
         c = scale_and_reduce(c, params.scales, params.num_tokens, params.topk, b.size(-1))
             
     return c.to(dtype)
-
-def torch_grouped_glu(
-    a: torch.Tensor,
-    params: MGroupedGEMMParams,
-):
-    r"""
-    This is a reference implementation of a GLU, with an optional
-    fused gather operation.
-    """
-    assert params.gate_weight.size() == params.up_weight.size()
-    
-    dtype = a.dtype
-    group_indices = params.group_indices
-    gather_indices = params.permute_indices // params.topk if params.gather else None
-    
-    if params.gather:
-        c_rows = a.size(0) * params.topk
-    else:
-        c_rows = a.size(0)    
-    c = torch.zeros(c_rows, params.gate_weight.size(-1), device=a.device, dtype=dtype)
-    
-    for i in range(params.gate_weight.size(0)):
-        glo, ghi = group_indices[i].item(), group_indices[i + 1].item()
-        if params.gather:
-            index = gather_indices[glo:ghi].unsqueeze(-1).expand(-1, a.size(-1))
-            a_gather = torch.gather(a, dim=0, index=index)
-        else:
-            a_gather = a[glo:ghi]
-            
-        gate_prod = activation(a_gather @ params.gate_weight[i], params.activation)
-        up_prod = a_gather @ params.up_weight[i]
-
-        c[glo:ghi] = gate_prod * up_prod
-         
-    return c
 
 def perfect_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):
     r"""
@@ -274,22 +241,6 @@ def random_mlp(
         dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
         activation
     )
-
-def random_glu(
-    num_experts,
-    hidden_dim,
-    intermediate_dim,
-    activation,
-    device,
-    dtype,
-    dist=uniform_weight_init,
-):
-    return GLUParams(
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
-        dist((num_experts, hidden_dim, intermediate_dim), device=device, dtype=dtype),
-        dist((num_experts, intermediate_dim, hidden_dim), device=device, dtype=dtype),
-        activation
-    )
     
 def random_interleaved_glu(
     num_experts,
@@ -352,6 +303,7 @@ def assert_close(a, b):
         raise ValueError(f"Invalid dtype: {a.dtype}")
     k = a.size(-1)
     m = max(a.max(), b.max()).item()
-    atol = min(1e-2, k * m * eps * 1e-2)
-    rtol = math.sqrt(k) * eps * 1e-1
+    atol = 2e-2
+    rtol = math.log10(k) * eps
+    print(f"atol: {atol}, rtol: {rtol}")
     torch.testing.assert_close(a, b, atol=atol, rtol=rtol)

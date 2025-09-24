@@ -12,17 +12,10 @@ class MLPParams(FFNParams):
     weight1: torch.Tensor
     weight2: torch.Tensor
     activation: Activation
-
-@dataclass
-class GLUParams(FFNParams):
-    gate_weight: torch.Tensor
-    up_weight: torch.Tensor
-    down_weight: torch.Tensor
-    activation: Activation
     
 @dataclass
-class GLUInterleavedParams(FFNParams):
-    interleaved_weight: torch.Tensor
+class SharedExpertParams(FFNParams):
+    up_weight: torch.Tensor
     down_weight: torch.Tensor
     activation: Activation
     
@@ -49,6 +42,8 @@ class MOEParams:
     expert_params: FFNParams
     num_experts: int
     topk: int
+    shared_expert_params: Optional[SharedExpertParams] = None
+    num_shared_experts: int = 0
 
 @dataclass
 class ExpertMatmulParams:

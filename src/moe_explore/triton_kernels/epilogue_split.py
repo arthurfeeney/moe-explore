@@ -33,7 +33,6 @@ def store_split_epilogue(
     accs,
 ):
     n_offset = tl.arange(0, accs[0].shape[1])
-
     for i in tl.static_range(len(accs)):
         out = accs[i]
         epilogue_split_offset = i * out.shape[1]

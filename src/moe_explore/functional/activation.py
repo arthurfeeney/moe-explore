@@ -1,14 +1,17 @@
 import torch
 from enum import StrEnum
-from typing import assert_never
+from typing import assert_never, Optional
 
 class Activation(StrEnum):
+    NONE = "none"
     SILU = "silu"
     GELU = "gelu"
     SWIGLU = "swiglu"
     GEGLU = "geglu"
 
-def activation(x: torch.Tensor, activation: Activation):
+def activation(x: torch.Tensor, activation: Optional[Activation] = None):
+    if activation is None or activation == Activation.NONE:
+        return x
     assert activation in Activation, f"Invalid activation: {activation}"
     if activation == Activation.SILU:
         return torch.nn.functional.silu(x)
