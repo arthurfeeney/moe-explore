@@ -38,9 +38,9 @@ def olmoe_forward(
     moe = Olmoe(olmoe_config).to("cuda")
     moe.init_weights(
         params.router_params.router_weight,
-        params.expert_params.gate_weight,
-        params.expert_params.up_weight,
-        params.expert_params.down_weight
+        params.expert_params.weight1[:, :, 0::2],
+        params.expert_params.weight1[:, :, 1::2],
+        params.expert_params.weight2
     )
     output, _ = moe(input)
     del moe
@@ -71,9 +71,9 @@ def qwen3_moe_forward(
     moe = Qwen3Moe(qwen3_config).to("cuda")
     moe.init_weights(
         params.router_params.router_weight,
-        params.expert_params.gate_weight,
-        params.expert_params.up_weight,
-        params.expert_params.down_weight
+        params.expert_params.weight1[:, :, 0::2],
+        params.expert_params.weight1[:, :, 1::2],
+        params.expert_params.weight2
     )
     output, _ = moe(input)
     del moe
@@ -109,9 +109,9 @@ def ernie4_5_moe_forward(
     moe.init_weights(
         params.router_params.router_weight.to(torch.float32),
         params.router_params.bias.to(torch.float32),
-        params.expert_params.gate_weight,
-        params.expert_params.up_weight,
-        params.expert_params.down_weight)
+        params.expert_params.weight1[:, :, 0::2],
+        params.expert_params.weight1[:, :, 1::2],
+        params.expert_params.weight2)
     output, _ = moe(input)
     del moe
     return output

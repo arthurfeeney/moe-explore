@@ -44,7 +44,7 @@ def ernie_router(
     with torch.autocast(device_type=input.device.type, enabled=False):
         logits = input.float() @ router_params.router_weight
         weights = softmax(logits)
-        # in huggingface, it's topk(moe_statics(weights)), but the moe_statics is just adding a bias?
+        # in huggingface, it's topk(moe_statics(weights)), but the moe_statics is just adding a bias
         _, topk_indices = torch.topk(weights + router_params.bias, k=router_params.topk, dim=-1, sorted=False)
         weights = torch.gather(weights, index=topk_indices, dim=-1)
         # The min=1e-12 is hardcoded from `moe_norm_min` in huggingface config.
