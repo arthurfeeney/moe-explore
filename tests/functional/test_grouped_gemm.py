@@ -1,4 +1,4 @@
-from moe_explore.functional.m_grouped_gemm import grouped_gemm, torch_grouped_gemm
+from moe_explore.functional.m_grouped_gemm import m_grouped_gemm, torch_grouped_gemm
 from moe_explore.testing import random_groups, torch_grouped_matmul_gather_scatter, assert_close
 import torch
 import math
@@ -19,7 +19,7 @@ def test_grouped_gemm():
     tokens.requires_grad = True
     weight.requires_grad = True
     
-    output = grouped_gemm(tokens, weight, group_indices, permute_indices, gather, scatter, num_tokens, topk, activation)
+    output = m_grouped_gemm(tokens, weight, group_indices, permute_indices, gather, scatter, num_tokens, topk, activation)
     output.sum().backward()
     actual_weight_grad = weight.grad.data.clone()
     actual_tokens_grad = tokens.grad.data.clone()

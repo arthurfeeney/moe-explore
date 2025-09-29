@@ -7,7 +7,7 @@ from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
 from .activation import TRITON_ACTIVATIONS
 from .autotune_config import (
-    AutotuneMode, 
+    AutotuneMode,
     fast_autotune_configs, 
     max_autotune_configs
 )
@@ -16,19 +16,14 @@ from .epilogue_split import epilogue_split, store_split_epilogue
 @dataclass
 class KGroupedGEMMParams:
     permute_indices: Optional[torch.Tensor]
-    gather: bool
-    scatter: bool
+    gather_a: bool
+    gather_b: bool
     # `num_tokens` is confusing. When doing a scatter or gather, it's the number of tokens
     # before routing! If we are NOT doing a scatter or gather, it's just the number of tokens being input.
     # If we do a gather, `num_tokens` is the number of tokens in the input, before the gather.
     # Similar for when we do a scatter, it's the number of tokens in the output, after the scatter.
     num_tokens: int
     topk: int
-    # This is necessary for matrices that are stored in a transposed layout.
-    # I.e., tensor.t().contiguous() and we want the kernel to internally evaluate it as untransposed.
-    # If we just take a view, like tensor.t(), the strides will account for it, so no flag is needed.
-    is_a_transposed: bool = False
-    is_b_transposed: bool = False
     activation: Optional[Callable] = None
 
 @triton.jit
@@ -52,10 +47,8 @@ def k_grouped_gemm_inner_kernel(
     k,
     N: tl.constexpr,
     TOPK: tl.constexpr,
-    GATHER_ROWS: tl.constexpr,
-    SCATTER_ROWS: tl.constexpr,
-    IS_A_TRANSPOSED: tl.constexpr,
-    IS_B_TRANSPOSED: tl.constexpr,
+    GATHER_A: tl.constexpr,
+    GATHER_B: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -76,7 +69,7 @@ def k_grouped_gemm_inner_kernel(
     
     # TODO: Struggling to get this loop to flatten, so the pipeline has bubbles.
     # Checking ttgir, clearly the loops are not being fused and there is an async_wait
-    # after the inner mma loop. Same output with either flatten=True/False
+    # after the inner mma loop. Same output with either flatten=True/False.
     for _ in tl.range(tile_id, end_tile_id, NUM_PROGRAMS, flatten=True):
         
         tile_id_in_gemm = tile_id - last_problem_end
@@ -106,11 +99,19 @@ def k_grouped_gemm_inner_kernel(
         k_offset = tl.arange(0, BLOCK_K)
         
         # `a` is [K, M], so we load a [BLOCK_K, BLOCK_M] tile and will transpose it.
-        a_row_offsets = (start_idx + k_offset) * a_strides[0]
+        if GATHER_A:
+            permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)
+            a_row_offsets = (permute_a_indices // TOPK) * a_strides[0]
+        else:
+            a_row_offsets = (start_idx + k_offset) * a_strides[0]
         a_col_offsets = tile_m_offsets * a_strides[1]
         a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
 
-        b_row_offsets = (start_idx + k_offset) * b_strides[0]
+        if GATHER_B:
+            permute_b_indices = tl.load(permute_indices_ptr + start_idx + tile_n_offsets)
+            b_row_offsets = (permute_b_indices // TOPK) * b_strides[0]
+        else:
+            b_row_offsets = (start_idx + k_offset) * b_strides[0]
         b_col_offsets = tile_n_offsets * b_strides[1]            
         b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
 
@@ -155,7 +156,6 @@ def k_grouped_gemm_inner_kernel(
         out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
         out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
 
-        #out_row_offsets = start_idx + tile_m_offsets
         out_row_offsets = tile_m_offsets
         out_offsets = problem_id * out_strides[0] + out_row_offsets[:, None] * out_strides[1] + out_tile_n_offsets * out_strides[2]
         out_ptrs = out_ptr + out_offsets
@@ -181,10 +181,8 @@ def k_grouped_gemm_persistent_kernel(
     M: tl.constexpr,
     N: tl.constexpr,
     TOPK: tl.constexpr,
-    GATHER_ROWS: tl.constexpr,
-    SCATTER_ROWS: tl.constexpr,
-    IS_A_TRANSPOSED: tl.constexpr,
-    IS_B_TRANSPOSED: tl.constexpr,
+    GATHER_A: tl.constexpr,
+    GATHER_B: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -235,10 +233,8 @@ def k_grouped_gemm_persistent_kernel(
             k,
             N,
             TOPK,
-            GATHER_ROWS,
-            SCATTER_ROWS,
-            IS_A_TRANSPOSED,
-            IS_B_TRANSPOSED,
+            GATHER_A,
+            GATHER_B,
             NUM_PROGRAMS,
             BLOCK_M,
             BLOCK_N,
@@ -255,13 +251,13 @@ def k_grouped_gemm_persistent_kernel(
 
 _fast_autotune_k_grouped_gemm_persistent_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
-    key=['NUM_TOKENS', 'E', 'M', 'N', 'GATHER_ROWS', 'SCATTER_ROWS'],
+    key=['NUM_TOKENS', 'E', 'M', 'N', 'GATHER_A', 'GATHER_B'],
     reset_to_zero=['out_ptr']
 )(k_grouped_gemm_persistent_kernel)
 
 _max_autotune_k_grouped_gemm_persistent_kernel = triton.autotune(
     configs=max_autotune_configs(persistent=True),
-    key=['NUM_TOKENS', 'E', 'M', 'N', 'GATHER_ROWS', 'SCATTER_ROWS'],
+    key=['NUM_TOKENS', 'E', 'M', 'N', 'GATHER_A', 'GATHER_B'],
     reset_to_zero=['out_ptr']
 )(k_grouped_gemm_persistent_kernel)
 
@@ -270,48 +266,19 @@ def k_grouped_gemm_default_config(e, params):
     BLOCK_N = 256
     BLOCK_K = 32
     num_stages = 5
-    if not (params.gather or params.scatter):
-        default_config = triton.Config({
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
-                "NUM_PROGRAMS": get_gpu_sm_count(),
-                "CACHE_GROUP_M": 8,
-                "EPILOGUE_SPLIT": 2,
-                "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_TENSOR_DESCRIPTOR": False,
-            },
-            num_warps=8, 
-            num_stages=num_stages
-        )
-    elif params.gather:
-        default_config = triton.Config({
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
-                "NUM_PROGRAMS": get_gpu_sm_count(),
-                "CACHE_GROUP_M": 8,
-                "EPILOGUE_SPLIT": 2,
-                "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_TENSOR_DESCRIPTOR": False,
-            },
-            num_warps=8, 
-            num_stages=num_stages
-        )
-    elif params.scatter:
-        default_config = triton.Config({
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
-                "NUM_PROGRAMS": get_gpu_sm_count(),
-                "CACHE_GROUP_M": 8,
-                "EPILOGUE_SPLIT": 2,
-                "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_TENSOR_DESCRIPTOR": False,
-            },
-            num_warps=8, 
-            num_stages=num_stages
-        )
+    default_config = triton.Config({
+            "BLOCK_M": BLOCK_M, 
+            "BLOCK_N": BLOCK_N, 
+            "BLOCK_K": BLOCK_K,
+            "NUM_PROGRAMS": get_gpu_sm_count(),
+            "CACHE_GROUP_M": 8,
+            "EPILOGUE_SPLIT": 2,
+            "DISALLOW_ACC_MULTI_BUFFER": False,
+            "USE_TENSOR_DESCRIPTOR": False,
+        },
+        num_warps=8, 
+        num_stages=num_stages
+    )
     return default_config
 
 def k_grouped_gemm(
@@ -325,7 +292,7 @@ def k_grouped_gemm(
     assert b.dim() == 2
     assert autotune_mode is None or autotune_mode in AutotuneMode
 
-    if params.gather or params.scatter:
+    if params.gather_a or params.gather_b:
         assert params.permute_indices is not None
 
     num_tokens = params.num_tokens
@@ -336,11 +303,11 @@ def k_grouped_gemm(
     #    out_rows = num_tokens * params.topk
     #else:
     #    out_rows = num_tokens
-        
+
     #out_cols = n
     #if params.activation is not None and "glu" in params.activation:
     #    out_cols //= 2
-        
+
     out = torch.empty((group_indices.size(0) - 1, m, n), device=a.device, dtype=a.dtype)
 
     default_config = k_grouped_gemm_default_config(group_indices.size(0) - 1, params)
@@ -371,10 +338,8 @@ def k_grouped_gemm(
         M=m,
         N=n,
         TOPK=params.topk,
-        GATHER_ROWS=params.gather,
-        SCATTER_ROWS=params.scatter,
-        IS_A_TRANSPOSED=params.is_a_transposed,
-        IS_B_TRANSPOSED=params.is_b_transposed,
+        GATHER_A=params.gather_a,
+        GATHER_B=params.gather_b,
         EPILOGUE=epilogue,
         **default_kwargs
     )
