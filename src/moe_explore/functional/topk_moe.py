@@ -5,7 +5,7 @@ from moe_explore.functional.activation import activation
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices
-from moe_explore.functional.m_grouped_gemm import m_grouped_gemm_forward, m_grouped_gemm_backward
+from moe_explore.functional.m_grouped_gemm import m_grouped_gemm
 
 def topk_moe_forward(
     input: torch.Tensor,
@@ -17,9 +17,9 @@ def topk_moe_forward(
         topk_scores, topk_indices = router(input, params.router_params)
     with proton.scope("get_token_indices"):
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
-        
+
     with proton.scope("fused_grouped_glu"):
-        glu = m_grouped_gemm_forward(
+        glu = m_grouped_gemm(
             input,
             ep.weight1,
             perm_to_group_indices.group_indices,
@@ -32,7 +32,7 @@ def topk_moe_forward(
         )
         
     with proton.scope("down_grouped_gemm"):
-        down = m_grouped_gemm_forward(
+        down = m_grouped_gemm(
             glu,
             ep.weight2,
             perm_to_group_indices.group_indices,
@@ -47,16 +47,7 @@ def topk_moe_forward(
     with proton.scope("scale_and_reduce"):
         down = scale_and_reduce(down, topk_scores, input.size(0), params.topk, down.size(-1))
 
-    if params.shared_expert_params is not None:
-        with proton.scope("shared_expert"):
-            h = input @ params.shared_expert_params.up_weight
-            h = activation(h, params.shared_expert_params.activation)
-            h = h @ params.shared_expert_params.down_weight
-            h = h.sum(0)
-            down = down + h
-
     return down
-
 
 @torch.compile
 def topk_moe_torch(
