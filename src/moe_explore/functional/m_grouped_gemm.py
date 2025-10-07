@@ -1,6 +1,7 @@
 import torch
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm as triton_m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.k_grouped_gemm import k_grouped_gemm as triton_k_grouped_gemm, KGroupedGEMMParams
+from moe_explore.functional.activation import activation as activation_func
 from typing import Optional
 
 def m_grouped_gemm_forward(
@@ -19,18 +20,19 @@ def m_grouped_gemm_forward(
     assert group_indices.size(0) == weight.size(0) + 1
     assert num_tokens > 0 and topk > 0
     if gather or scatter:
-        assert permute_indices is not None       
-    params = MGroupedGEMMParams(
-        permute_indices=permute_indices,
-        gather=gather,
-        scatter=scatter,
-        num_tokens=num_tokens,
-        topk=topk,
-        activation=activation,
-        is_a_transposed=False,
-        is_b_transposed=False
-    )
-    return triton_m_grouped_gemm(tokens, weight, group_indices, params)
+        assert permute_indices is not None      
+    with torch.no_grad(): 
+        params = MGroupedGEMMParams(
+            permute_indices=permute_indices,
+            gather=gather,
+            scatter=scatter,
+            num_tokens=num_tokens,
+            topk=topk,
+            activation=activation,
+            is_a_transposed=False,
+            is_b_transposed=False
+        )
+        return triton_m_grouped_gemm(tokens, weight, group_indices, params)
 
 def m_grouped_gemm_backward(
     grad_output: torch.Tensor,
@@ -38,8 +40,9 @@ def m_grouped_gemm_backward(
     weight: torch.Tensor,
     group_indices: torch.Tensor,
     permute_indices: torch.Tensor,
-    gather: bool,
-    scatter: bool,
+    # Did we scatter or gather in the forward pass?
+    forward_gather: bool,
+    forward_scatter: bool,
     num_tokens: int,
     topk: int,
     activation: Optional[str]
@@ -50,30 +53,46 @@ def m_grouped_gemm_backward(
         (2) grad_weight = tokens^T * grad_output
     The main difficulty for (2) is that both tokens and grad_output are grouped
     for the grad_weight calculation. So it currently cannot reuse the m_grouped_gemm kernel.
-    """
-    grad_params = MGroupedGEMMParams(
-        permute_indices=permute_indices,
-        gather=scatter,
-        scatter=gather,
-        num_tokens=num_tokens,
-        topk=topk,
-        activation=activation,
-        is_a_transposed=False,
-        is_b_transposed=False
-    )
-    grad_tokens = triton_m_grouped_gemm(grad_output, weight.permute(0, 2, 1), group_indices, grad_params)
-    
-    grad_params = KGroupedGEMMParams(
-        permute_indices=permute_indices,
-        gather_a=gather,
-        gather_b=scatter,
-        num_tokens=num_tokens,
-        topk=topk,
-        activation=activation
-    )
-    grad_weight = triton_k_grouped_gemm(tokens, grad_output, group_indices, grad_params)
+    """    
+    with torch.no_grad():
+        grad_token_params = MGroupedGEMMParams(
+            # TODO: This * topk is used because inside the kernel the gather // topk...
+            # Since the grad_output is the otuput of grad(scale_and_reduce), we do not want
+            # to divide by topk inside the kernel.
+            permute_indices=permute_indices * topk if forward_scatter else permute_indices,
+            gather=forward_scatter,
+            scatter=forward_gather,
+            num_tokens=num_tokens,
+            topk=topk,
+            activation=activation,
+            is_a_transposed=False,
+            is_b_transposed=False
+        )
+        grad_tokens = triton_m_grouped_gemm(grad_output, weight.permute(0, 2, 1), group_indices, grad_token_params)
+        if forward_gather:
+            grad_tokens = grad_tokens.view(-1, topk, tokens.size(-1)).sum(dim=1)
         
-    return grad_tokens, grad_weight
+        # TODO: these are tricky to fuse with k_grouped_gemm
+        if forward_gather:
+            tokens_gather = tokens[permute_indices // topk]
+        else:
+            tokens_gather = tokens
+        if forward_scatter:
+            grad_output_gather = grad_output[permute_indices]
+        else:
+            grad_output_gather = grad_output
+
+        grad_weight_params = KGroupedGEMMParams(
+            permute_indices=permute_indices,
+            gather_a=forward_gather,
+            gather_b=forward_gather,
+            num_tokens=num_tokens,
+            topk=topk,
+            activation=None
+        )
+        grad_weight = triton_k_grouped_gemm(tokens_gather, grad_output_gather, group_indices, grad_weight_params)
+
+        return grad_tokens, grad_weight
 
 class MGroupedGEMM(torch.autograd.Function):
     @staticmethod
@@ -85,6 +104,8 @@ class MGroupedGEMM(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         tokens, weight, group_indices, permute_indices = ctx.saved_tensors
+        #if ctx.activation is not None:
+        #    grad_output = grad_output * activation_func(grad_output, ctx.activation)
         return (
             *m_grouped_gemm_backward(
                 grad_output, 
@@ -96,9 +117,10 @@ class MGroupedGEMM(torch.autograd.Function):
                 ctx.scatter, 
                 ctx.num_tokens, 
                 ctx.topk, 
-                ctx.activation
+                # TODO: activation for this should be applied before gemm kernel...
+                None
             ),
-            None, 
+            None,
             None,
             None,
             None,
@@ -106,8 +128,7 @@ class MGroupedGEMM(torch.autograd.Function):
             None,
             None
         )
-        
-# This wrapper looks redundant but is used because .apply cannot take keyword arguments.
+
 def m_grouped_gemm(
     tokens: torch.Tensor, 
     weight: torch.Tensor, 
@@ -156,11 +177,8 @@ def torch_grouped_gemm(
             c[scatter_indices[glo:ghi]] = prod
         else:
             c[glo:ghi] = prod
-            
+                        
     if activation is not None:
-        c = activation(c, activation)
-            
-    if scatter and scales is not None:
-        c = scale_and_reduce(c, scales, num_tokens, topk, weight.size(-1))
-            
+        c = activation_func(c, activation)
+
     return c.to(dtype)

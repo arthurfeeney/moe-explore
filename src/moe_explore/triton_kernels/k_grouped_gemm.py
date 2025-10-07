@@ -97,21 +97,17 @@ def k_grouped_gemm_inner_kernel(
         tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets % N, BLOCK_N), BLOCK_N)
 
         k_offset = tl.arange(0, BLOCK_K)
+                
+        # NOTE: The kernel has to step DOWN the permute_indices... That's kind of bad...?
+        # We have to load the permute indices inside the inner loop... This kernel is
+        # going to be more complicated than I thought...
+        # NOTE: the GATHER_A and GATHER_B are currently unused.
         
-        # `a` is [K, M], so we load a [BLOCK_K, BLOCK_M] tile and will transpose it.
-        if GATHER_A:
-            permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)
-            a_row_offsets = (permute_a_indices // TOPK) * a_strides[0]
-        else:
-            a_row_offsets = (start_idx + k_offset) * a_strides[0]
+        a_row_offsets = (start_idx + k_offset) * a_strides[0]
         a_col_offsets = tile_m_offsets * a_strides[1]
         a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
 
-        if GATHER_B:
-            permute_b_indices = tl.load(permute_indices_ptr + start_idx + tile_n_offsets)
-            b_row_offsets = (permute_b_indices // TOPK) * b_strides[0]
-        else:
-            b_row_offsets = (start_idx + k_offset) * b_strides[0]
+        b_row_offsets = (start_idx + k_offset) * b_strides[0]
         b_col_offsets = tile_n_offsets * b_strides[1]            
         b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
 
@@ -125,10 +121,10 @@ def k_grouped_gemm_inner_kernel(
             
             k_remaining = k - k_iter * BLOCK_K
             if MASK_N:
-                a_mask = (k_offset < k_remaining)[:, None] & (tile_m_offsets < M)
+                a_mask = ((k_offset < k_remaining)[:, None] & (tile_m_offsets < M))
                 b_mask = (k_offset[:, None] < k_remaining) & (tile_n_offsets < N)
             else:
-                a_mask = (k_offset < k_remaining)[:, None] & (tile_m_offsets < M)
+                a_mask = ((k_offset < k_remaining)[:, None] & (tile_m_offsets < M))
 
             # TODO: this branch may not be necessary if triton is able
             # to optimize away the masking on its own.
@@ -138,7 +134,7 @@ def k_grouped_gemm_inner_kernel(
             else:
                 a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
                 b_block = tl.load(b_ptrs)
-                
+
             acc = tl.dot(a_block.T, b_block, acc=acc)
             
             a_ptrs += BLOCK_K * a_strides[0]
@@ -299,16 +295,7 @@ def k_grouped_gemm(
     _, m = a.size()
     _, n = b.size()
 
-    #if params.gather or params.scatter:
-    #    out_rows = num_tokens * params.topk
-    #else:
-    #    out_rows = num_tokens
-
-    #out_cols = n
-    #if params.activation is not None and "glu" in params.activation:
-    #    out_cols //= 2
-
-    out = torch.empty((group_indices.size(0) - 1, m, n), device=a.device, dtype=a.dtype)
+    out = torch.ones((group_indices.size(0) - 1, m, n), device=a.device, dtype=a.dtype)
 
     default_config = k_grouped_gemm_default_config(group_indices.size(0) - 1, params)
     default_kwargs = default_config.all_kwargs()
