@@ -18,7 +18,10 @@ import pytest
     (200, 4, 512, 512, "swiglu", torch.bfloat16),
     (200, 4, 512, 512, "geglu", torch.bfloat16),
     (1000, 16, 1024, 1024, "gelu", torch.bfloat16),
+    (1000, 16, 1024, 1024, "grad_silu", torch.bfloat16),
+    (1000, 16, 1024, 1024, "grad_gelu", torch.bfloat16),
     (1000, 16, 1024, 1024, "swiglu", torch.bfloat16),
+    (16000, 16, 1024, 1024, "geglu", torch.bfloat16),
     (16000, 16, 1024, 1024, "geglu", torch.bfloat16),
     # TODO: Group size one is broken.
     #(1000, 1, 1024, 1024, "geglu", torch.bfloat16),
@@ -39,7 +42,7 @@ def test_m_grouped_gemm(
     """
     assert torch.cuda.is_available()
     input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
-    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N)
     group_indices = random_groups(num_tokens, num_experts, device="cuda")
         
     params = MGroupedGEMMParams(
