@@ -176,7 +176,7 @@ def m_grouped_gemm_inner_kernel(
             if IS_B_TRANSPOSED:
                 b_block = b_block.T
 
-            acc = tl.dot(a_block, b_block, acc=acc)
+            acc = tl.dot(a_block, b_block, acc=acc, input_precision="ieee")
             
             if IS_A_TRANSPOSED:
                 a_ptrs += BLOCK_K * a_strides[0]
@@ -328,9 +328,10 @@ def m_grouped_gemm_default_config(e, params, dtype):
     BLOCK_M = 128
     BLOCK_N = 256
     BLOCK_K = 32
-    if dtype == torch.float32:
-        BLOCK_N /= 2
     num_stages = 5
+    if dtype == torch.float32:
+        BLOCK_N //= 2
+        num_stages -= 1
     if not (params.gather or params.scatter):
         default_config = triton.Config({
                 "BLOCK_M": BLOCK_M, 

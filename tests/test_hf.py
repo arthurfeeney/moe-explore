@@ -12,11 +12,19 @@ QWEN3 = "Qwen/Qwen3-30B-A3B"
 ERNIE4 = "baidu/ERNIE-4.5-21B-A3B-Base-PT"
 
 def hf_config_to_moe_params(config, model_name):
+    if config.hidden_act == "silu":
+        activation = "swiglu"
+    elif config.hidden_act == "gelu":
+        activation = "geglu"
+    else:
+        raise ValueError(f"Invalid activation: {config.hidden_act}, need silu or gelu")
+    
+    
     expert_params = random_interleaved_glu(
         config.num_experts,
         config.hidden_size,
         config.intermediate_size,
-        config.hidden_act,
+        activation,
         "cuda",
         torch.bfloat16
     )    
@@ -50,25 +58,46 @@ def hf_config_to_moe_params(config, model_name):
         )
 
 @pytest.mark.parametrize(
-    "seq_len,model_name,forward", [(128, OLMOE, olmoe_forward)]
+    "seq_len,model_name,forward", [
+        (128, OLMOE, olmoe_forward),
+        (256, OLMOE, olmoe_forward),
+        # Disabling because these seem to hit memory limits on smaller GPUs
+        # (128, QWEN3, qwen3_moe_forward)
+        # (128, ERNIE4, ernie4_5_moe_forward)
+    ]
 )
 def test_huggingface(seq_len, model_name, forward):
     config = AutoConfig.from_pretrained(model_name)
     moe_params = hf_config_to_moe_params(config, model_name=model_name)
-    input = torch.randn((seq_len, config.hidden_size), device="cuda", dtype=torch.bfloat16)
+    input = torch.randn((seq_len, config.hidden_size), device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     ref_output = forward(
         config,
         input.unsqueeze(0),
         moe_params
-    ).squeeze(0)    
+    ).squeeze(0)
+    
+    ref_output.sum().backward()
+    ref_input_grad = input.grad.data.clone()
+    
+    del ref_output
+    
 
-    #interleaved_glu_params = get_interleave_glu_params(input, moe_params)
     gg_interleaved_output = topk_moe_forward(
         input,
         moe_params
     )
 
+    gg_interleaved_output.sum().backward()
+    gg_interleaved_input_grad = input.grad.data.clone()
+ 
     assert ref_output.isfinite().all()
     assert gg_interleaved_output.isfinite().all()
     assert_close(ref_output, gg_interleaved_output)
+    
+    assert ref_input_grad.isfinite().all()
+    assert gg_interleaved_input_grad.isfinite().all()
+    assert_close(ref_input_grad, gg_interleaved_input_grad)
+
+
+ 

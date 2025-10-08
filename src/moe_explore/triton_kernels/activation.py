@@ -23,7 +23,6 @@ def grad_silu(x: tl.tensor):
 def approx_gelu(x: tl.tensor):
     # This is the approximation of gelu used by pytorch:
     # https://docs.pytorch.org/docs/stable/generated/torch.nn.GELU.html
-    pi: tl.constexpr = 3.14159265358979323846
     SQRT_2_DIV_PI: tl.constexpr = 0.7978845608
     tensor_cubed = x * x * x
     return 0.5 * x * (1 + libdevice.tanh(SQRT_2_DIV_PI * (x + 0.044715 * tensor_cubed)))
