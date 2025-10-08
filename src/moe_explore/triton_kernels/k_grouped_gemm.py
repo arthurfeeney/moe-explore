@@ -135,7 +135,7 @@ def k_grouped_gemm_inner_kernel(
                 a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
                 b_block = tl.load(b_ptrs)
 
-            acc = tl.dot(a_block.T, b_block, acc=acc)
+            acc = tl.dot(a_block.T, b_block, acc=acc, input_precision="ieee")
             
             a_ptrs += BLOCK_K * a_strides[0]
             b_ptrs += BLOCK_K * b_strides[0]
@@ -201,9 +201,10 @@ def k_grouped_gemm_persistent_kernel(
     tl.assume(out_strides[0] > 0)
     tl.assume(out_strides[1] > 0)
     
-    start_idx = 0
+    #start_idx = 0
     for problem_id in tl.range(0, NUM_EXPERTS):
-        end_idx = tl.load(group_indices_ptr + problem_id + 1, cache_modifier=".ca")
+        group_bounds = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2), cache_modifier=".ca")
+        start_idx, end_idx = group_bounds.split()
         k = end_idx - start_idx
         
         tl.assume(start_idx >= 0)
@@ -261,9 +262,10 @@ def k_grouped_gemm_default_config(e, params, dtype):
     BLOCK_M = 128
     BLOCK_N = 256
     BLOCK_K = 32
-    if dtype == torch.float32:
-        BLOCK_N /= 2
     num_stages = 5
+    if dtype == torch.float32:
+        BLOCK_N //= 2
+        num_stages -= 1
     default_config = triton.Config({
             "BLOCK_M": BLOCK_M, 
             "BLOCK_N": BLOCK_N, 

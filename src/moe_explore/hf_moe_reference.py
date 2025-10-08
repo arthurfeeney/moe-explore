@@ -35,7 +35,7 @@ def olmoe_forward(
     input: torch.Tensor,
     params: MOEParams
 ):
-    moe = Olmoe(olmoe_config).to("cuda")
+    moe = Olmoe(olmoe_config).to("cuda").to(torch.bfloat16)
     moe.init_weights(
         params.router_params.router_weight,
         params.expert_params.weight1[:, :, 0::2],
@@ -68,7 +68,7 @@ def qwen3_moe_forward(
     input: torch.Tensor,
     params: MOEParams
 ):
-    moe = Qwen3Moe(qwen3_config).to("cuda")
+    moe = Qwen3Moe(qwen3_config).to("cuda").to(torch.bfloat16)
     moe.init_weights(
         params.router_params.router_weight,
         params.expert_params.weight1[:, :, 0::2],
@@ -76,7 +76,6 @@ def qwen3_moe_forward(
         params.expert_params.weight2
     )
     output, _ = moe(input)
-    del moe
     return output
 
 class Ernie4_5_Moe(Ernie4_5_MoeSparseMoeBlock):

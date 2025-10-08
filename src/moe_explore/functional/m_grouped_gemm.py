@@ -85,8 +85,8 @@ def m_grouped_gemm_backward(
         
     grad_weight_params = KGroupedGEMMParams(
         permute_indices=permute_indices,
-        gather_a=False, #forward_gather,
-        gather_b=False, #forward_gather,
+        gather_a=False,
+        gather_b=False,
         num_tokens=num_tokens,
         topk=topk,
         activation=None
@@ -105,8 +105,6 @@ class MGroupedGEMM(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         tokens, weight, group_indices, permute_indices = ctx.saved_tensors
-        #if ctx.activation is not None:
-        #    grad_output = grad_output * activation_func(grad_output, ctx.activation)
         return (
             *m_grouped_gemm_backward(
                 grad_output, 
