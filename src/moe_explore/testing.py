@@ -288,22 +288,22 @@ def random_ernie_router(
         topk,
     )
     
-def assert_close(a, b):
+def assert_close(a, b, atol=None, rtol=None):
     # Tolerances depend on the matrix dimensions and the range of
     # values. A matrix with larger values and K-dimension will accumulate
     # more floating point errors... This tries to set tolerances
     # based on the dtype's epsilon, k-dimension, and max value.
-    if a.dtype is torch.bfloat16:
-        eps = 0.0078125
-    elif a.dtype is torch.float16:
-        eps = 0.0009765625
-    elif a.dtype is torch.float32:
-        eps = 1e-6
-    else:
-        raise ValueError(f"Invalid dtype: {a.dtype}")
     k = a.size(-1)
-    m = max(a.max(), b.max()).item()
-    atol = 2e-2
-    rtol = math.log10(k) * eps
-    print(f"atol: {atol}, rtol: {rtol}")
+    if atol is None:
+        atol = 2e-2
+    if rtol is None:    
+        if a.dtype is torch.bfloat16:
+            eps = 0.0078125
+        elif a.dtype is torch.float16:
+            eps = 0.0009765625
+        elif a.dtype is torch.float32:
+            eps = 1e-6
+        else:
+            raise ValueError(f"Invalid dtype: {a.dtype}")
+        rtol = math.log10(k) * eps
     torch.testing.assert_close(a, b, atol=atol, rtol=rtol)

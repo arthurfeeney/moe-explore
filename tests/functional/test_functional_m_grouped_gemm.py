@@ -6,12 +6,12 @@ import torch
 import math
 
 def test_m_grouped_gemm():
-    num_tokens = 100
-    num_experts = 8
-    topk = 2
+    num_tokens = 1000
+    num_experts = 16
+    topk = 4
     
-    tokens = torch.randn((num_tokens, 128), dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn((num_experts, 128, 128), dtype=torch.bfloat16, device="cuda") / math.sqrt(128)
+    tokens = torch.randn((num_tokens, 128), dtype=torch.float16, device="cuda")
+    weight = torch.randn((num_experts, 128, 128), dtype=torch.float16, device="cuda") / math.sqrt(128)
     group_indices = random_groups(num_tokens, num_experts, device="cuda")
     permute_indices = None
     gather = False
@@ -39,9 +39,9 @@ def test_m_grouped_gemm():
     assert_close(actual_weight_grad, ref_weight_grad)
     
 def test_m_grouped_gemm_gather():
-    num_tokens = 100
-    num_experts = 8
-    topk = 2
+    num_tokens = 1000
+    num_experts = 16
+    topk = 4
     
     tokens = torch.randn((num_tokens, 128), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((num_experts, 128, 128), dtype=torch.bfloat16, device="cuda") / math.sqrt(128)
@@ -60,7 +60,7 @@ def test_m_grouped_gemm_gather():
     weight.requires_grad = True
     
     output = m_grouped_gemm(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
-    output.sum().backward()
+    output.mean().backward()
     actual_weight_grad = weight.grad.data.clone()
     actual_tokens_grad = tokens.grad.data.clone()
 
@@ -68,7 +68,7 @@ def test_m_grouped_gemm_gather():
     tokens.grad.data.zero_()
     
     ref = torch_grouped_gemm(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
-    ref.sum().backward()
+    ref.mean().backward()
     ref_weight_grad = weight.grad.data.clone()
     ref_tokens_grad = tokens.grad.data.clone()
     
@@ -76,14 +76,20 @@ def test_m_grouped_gemm_gather():
     assert_close(actual_tokens_grad, ref_tokens_grad)
     assert_close(actual_weight_grad, ref_weight_grad)
     
-def test_m_grouped_gemm_scatter():
-    num_tokens = 100
-    num_experts = 8
-    topk = 2
     
-    tokens = torch.randn((num_tokens * topk, 128), dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn((num_experts, 128, 128), dtype=torch.bfloat16, device="cuda") / math.sqrt(128)
-    topk_scores, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=torch.bfloat16)
+def setup(func):
+    # Using a seed so different `func` generate the same weights / tokens.
+    torch.manual_seed(0)
+    # This is using torch.autograd.grad to help with debugging.
+    # It makes it a little easier to check intermediate gradients.
+    
+    num_tokens = 1000
+    num_experts = 16
+    topk = 4
+    
+    tokens = torch.randn((num_tokens * topk, 128), dtype=torch.float16, device="cuda")
+    weight = torch.randn((num_experts, 128, 128), dtype=torch.float16, device="cuda") / math.sqrt(128)
+    topk_scores, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=torch.float16)
     p = get_token_indices(
         topk_indices.view(-1),
         topk,
@@ -94,26 +100,25 @@ def test_m_grouped_gemm_scatter():
     scatter = True
     activation = None
     
+    topk_scores.requires_grad = True
     tokens.requires_grad = True
     weight.requires_grad = True
-    
-    output = m_grouped_gemm(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
-    output = scale_and_reduce(output, topk_scores, num_tokens, topk, weight.size(-1))
-    output.sum().backward()
-    actual_weight_grad = weight.grad.data.clone()
-    actual_tokens_grad = tokens.grad.data.clone()
 
-    weight.grad.data.zero_()
-    tokens.grad.data.zero_()
+    output = func(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
+    loss1 = scale_and_reduce(output, topk_scores, num_tokens, topk, weight.size(-1)).sum()
     
-    ref = torch_grouped_gemm(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
-    ref = scale_and_reduce(ref, topk_scores, num_tokens, topk, weight.size(-1))
-    ref.sum().backward()
-    ref_weight_grad = weight.grad.data.clone()
-    ref_tokens_grad = tokens.grad.data.clone()
+    grads = torch.autograd.grad(loss1, [output, weight], retain_graph=True)
+    grad_output, grad_weight1 = grads[0], grads[1]
+    grad_output_weight = None #torch.autograd.grad(output.sum(), [weight])[0]
     
+    return loss1, output, grad_output, grad_weight1, grad_output_weight
+
+
+def test_m_grouped_gemm_scatter():
+    loss1, output, grad_output, grad_weight1, grad_output_weight = setup(m_grouped_gemm)
+    loss2, ref, grad_ref, grad_weight2, grad_ref_weight = setup(torch_grouped_gemm)
+
+    assert abs(loss1.item() - loss2.item()) < 1e-3
     assert_close(output, ref)
-    assert_close(actual_tokens_grad, ref_tokens_grad)
-    assert_close(actual_weight_grad, ref_weight_grad)
-    assert False
-    
+    assert_close(grad_output, grad_ref)
+    assert_close(grad_weight1, grad_weight2)

@@ -96,12 +96,7 @@ def test_topk_moe(
     assert actual_weight2_grad.isfinite().all()
     assert ref_weight2_grad.isfinite().all()
     
-    #print(actual_weight1_grad[0])
-   # print(ref_weight1_grad[0])
-   # print(actual_weight2_grad[0])
-   # print(ref_weight2_grad[0])
-    
     assert_close(output, ref_output)
-    #assert_close(actual_tokens_grad, ref_tokens_grad)
-    #assert_close(actual_weight1_grad, ref_weight1_grad)
+    assert_close(actual_tokens_grad, ref_tokens_grad)
+    assert_close(actual_weight1_grad, ref_weight1_grad)
     assert_close(actual_weight2_grad, ref_weight2_grad)
