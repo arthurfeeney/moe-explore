@@ -1,6 +1,7 @@
 import torch
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm as triton_m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.k_grouped_gemm import k_grouped_gemm as triton_k_grouped_gemm, KGroupedGEMMParams
+from moe_explore.triton_kernels.row_gather_scatter import row_gather, row_scatter
 from moe_explore.functional.activation import activation as activation_func
 from typing import Optional
 
@@ -21,18 +22,17 @@ def m_grouped_gemm_forward(
     assert num_tokens > 0 and topk > 0
     if gather or scatter:
         assert permute_indices is not None      
-    with torch.no_grad(): 
-        params = MGroupedGEMMParams(
-            permute_indices=permute_indices,
-            gather=gather,
-            scatter=scatter,
-            num_tokens=num_tokens,
-            topk=topk,
-            activation=activation,
-            is_a_transposed=False,
-            is_b_transposed=False
-        )
-        return triton_m_grouped_gemm(tokens, weight, group_indices, params)
+    params = MGroupedGEMMParams(
+        permute_indices=permute_indices,
+        gather=gather,
+        scatter=scatter,
+        num_tokens=num_tokens,
+        topk=topk,
+        activation=activation,
+        is_a_transposed=False,
+        is_b_transposed=False
+    )
+    return triton_m_grouped_gemm(tokens, weight, group_indices, params)
 
 def m_grouped_gemm_backward(
     grad_output: torch.Tensor,
@@ -54,45 +54,46 @@ def m_grouped_gemm_backward(
     The main difficulty for (2) is that both tokens and grad_output are grouped
     for the grad_weight calculation. So it currently cannot reuse the m_grouped_gemm kernel.
     """    
-    with torch.no_grad():
-        grad_token_params = MGroupedGEMMParams(
-            # TODO: This * topk is used because inside the kernel the gather // topk...
-            # Since the grad_output is the otuput of grad(scale_and_reduce), we do not want
-            # to divide by topk inside the kernel.
-            permute_indices=permute_indices * topk if forward_scatter else permute_indices,
-            gather=forward_scatter,
-            scatter=forward_gather,
-            num_tokens=num_tokens,
-            topk=topk,
-            activation=activation,
-            is_a_transposed=False,
-            is_b_transposed=False
-        )
-        grad_tokens = triton_m_grouped_gemm(grad_output, weight.permute(0, 2, 1), group_indices, grad_token_params)
-        if forward_gather:
-            grad_tokens = grad_tokens.view(-1, topk, tokens.size(-1)).sum(dim=1)
+    grad_token_params = MGroupedGEMMParams(
+        # TODO: This * topk is used because inside the kernel the gather // topk...
+        # Since the grad_output is the otuput of grad(scale_and_reduce), we do not want
+        # to divide by topk inside the kernel.
+        permute_indices=permute_indices * topk if forward_scatter else permute_indices,
+        gather=forward_scatter,
+        scatter=forward_gather,
+        num_tokens=num_tokens,
+        topk=topk,
+        activation=None,#activation,
+        is_a_transposed=False,
+        is_b_transposed=False
+    )
+    grad_tokens = triton_m_grouped_gemm(grad_output, weight.permute(0, 2, 1), group_indices, grad_token_params)
+    if forward_gather:
+        # The scatter is fused, but we need to reduce across the top-k entries.
+        grad_tokens = grad_tokens.view(-1, topk, tokens.size(-1)).sum(dim=1)
+    
+    # reorder data into groups.
+    # TODO: these are tricky to fuse with k_grouped_gemm
+    if forward_gather:
+        tokens_gather = tokens[permute_indices // topk]
+    else:
+        tokens_gather = tokens
+    if forward_scatter:
+        grad_output_gather = grad_output[permute_indices]
+    else:
+        grad_output_gather = grad_output
         
-        # TODO: these are tricky to fuse with k_grouped_gemm
-        if forward_gather:
-            tokens_gather = tokens[permute_indices // topk]
-        else:
-            tokens_gather = tokens
-        if forward_scatter:
-            grad_output_gather = grad_output[permute_indices]
-        else:
-            grad_output_gather = grad_output
+    grad_weight_params = KGroupedGEMMParams(
+        permute_indices=permute_indices,
+        gather_a=False, #forward_gather,
+        gather_b=False, #forward_gather,
+        num_tokens=num_tokens,
+        topk=topk,
+        activation=None
+    )
+    grad_weight = triton_k_grouped_gemm(tokens_gather, grad_output_gather, group_indices, grad_weight_params)
 
-        grad_weight_params = KGroupedGEMMParams(
-            permute_indices=permute_indices,
-            gather_a=forward_gather,
-            gather_b=forward_gather,
-            num_tokens=num_tokens,
-            topk=topk,
-            activation=None
-        )
-        grad_weight = triton_k_grouped_gemm(tokens_gather, grad_output_gather, group_indices, grad_weight_params)
-
-        return grad_tokens, grad_weight
+    return grad_tokens, grad_weight
 
 class MGroupedGEMM(torch.autograd.Function):
     @staticmethod
@@ -142,6 +143,7 @@ def m_grouped_gemm(
 ):
     return MGroupedGEMM.apply(tokens, weight, group_indices, permute_indices, gather, scatter, num_tokens, topk, activation)
 
+@torch.compile
 def torch_grouped_gemm(
     tokens: torch.Tensor, 
     weight: torch.Tensor, 
@@ -177,8 +179,5 @@ def torch_grouped_gemm(
             c[scatter_indices[glo:ghi]] = prod
         else:
             c[glo:ghi] = prod
-                        
-    if activation is not None:
-        c = activation_func(c, activation)
-
+            
     return c.to(dtype)

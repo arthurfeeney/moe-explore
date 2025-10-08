@@ -21,8 +21,8 @@ def grad_relu(x: torch.Tensor):
     return out
     
 def grad_silu(x: torch.Tensor):
-    sig_x = torch.nn.functional.sigmoid(x)
-    return sig_x * (1 + x * (1 - sig_x))#sig_x + x * sig_x * (1 - sig_x)
+    sig_x = torch.sigmoid(x)
+    return sig_x * (1 + x * (1 - sig_x))
     
 def swiglu(x: torch.Tensor):
     assert x.shape[-1] % 2 == 0
@@ -42,7 +42,7 @@ def activation(x: torch.Tensor, act: Optional[Activation] = None):
     assert act in Activation, f"Invalid activation: {act}"
     if act == Activation.RELU:
         return torch.nn.functional.relu(x)
-    if act == Activation.SILU:
+    elif act == Activation.SILU:
         return torch.nn.functional.silu(x)
     elif act == Activation.GELU:
         return torch.nn.functional.gelu(x)

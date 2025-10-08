@@ -324,10 +324,12 @@ _max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     reset_to_zero=['out_ptr']
 )(m_grouped_gemm_persistent_kernel)
 
-def m_grouped_gemm_default_config(e, params):
+def m_grouped_gemm_default_config(e, params, dtype):
     BLOCK_M = 128
     BLOCK_N = 256
     BLOCK_K = 32
+    if dtype == torch.float32:
+        BLOCK_N /= 2
     num_stages = 5
     if not (params.gather or params.scatter):
         default_config = triton.Config({
@@ -398,10 +400,10 @@ def m_grouped_gemm(
     out_cols = n
     if params.activation is not None and "glu" in params.activation:
         out_cols //= 2
-        
+
     out = torch.empty((out_rows, out_cols), device=a.device, dtype=a.dtype)
 
-    default_config = m_grouped_gemm_default_config(b.size(0), params)
+    default_config = m_grouped_gemm_default_config(b.size(0), params, a.dtype)
     default_kwargs = default_config.all_kwargs()
     func = m_grouped_gemm_persistent_kernel
     if autotune_mode == AutotuneMode.FAST:
@@ -412,9 +414,9 @@ def m_grouped_gemm(
         default_kwargs = {}
         
     epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
-        
+            
     grid = lambda META: (META["NUM_PROGRAMS"],)
-        
+
     func[grid](
         a, 
         a.stride(),

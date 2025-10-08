@@ -97,7 +97,7 @@ def k_grouped_gemm_inner_kernel(
         tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets % N, BLOCK_N), BLOCK_N)
 
         k_offset = tl.arange(0, BLOCK_K)
-                
+
         # NOTE: The kernel has to step DOWN the permute_indices... That's kind of bad...?
         # We have to load the permute indices inside the inner loop... This kernel is
         # going to be more complicated than I thought...
@@ -111,7 +111,6 @@ def k_grouped_gemm_inner_kernel(
         b_col_offsets = tile_n_offsets * b_strides[1]            
         b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
 
-        MASK_M: tl.constexpr = M % BLOCK_M != 0
         MASK_N: tl.constexpr = N % BLOCK_N != 0
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -120,11 +119,12 @@ def k_grouped_gemm_inner_kernel(
             tl.multiple_of(b_ptrs, [16, 16])
             
             k_remaining = k - k_iter * BLOCK_K
+
             if MASK_N:
-                a_mask = ((k_offset < k_remaining)[:, None] & (tile_m_offsets < M))
-                b_mask = (k_offset[:, None] < k_remaining) & (tile_n_offsets < N)
+                a_mask = (k_offset < k_remaining)[:, None] & (tile_m_offsets < M)
+                b_mask = (k_offset < k_remaining)[:, None] & (tile_n_offsets < N)
             else:
-                a_mask = ((k_offset < k_remaining)[:, None] & (tile_m_offsets < M))
+                a_mask = (k_offset < k_remaining)[:, None] & (tile_m_offsets < M)
 
             # TODO: this branch may not be necessary if triton is able
             # to optimize away the masking on its own.
@@ -138,7 +138,7 @@ def k_grouped_gemm_inner_kernel(
             acc = tl.dot(a_block.T, b_block, acc=acc)
             
             a_ptrs += BLOCK_K * a_strides[0]
-            b_ptrs += BLOCK_K * b_strides[1]
+            b_ptrs += BLOCK_K * b_strides[0]
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
@@ -146,7 +146,7 @@ def k_grouped_gemm_inner_kernel(
 
         tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
         tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
-        out_m_mask = tile_m_offsets < M #start_idx + tile_m_offsets < end_idx
+        out_m_mask = tile_m_offsets < M
         # The accumulators are all the same size, but the EPILOGUE may change the 
         # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
         out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
@@ -257,10 +257,12 @@ _max_autotune_k_grouped_gemm_persistent_kernel = triton.autotune(
     reset_to_zero=['out_ptr']
 )(k_grouped_gemm_persistent_kernel)
 
-def k_grouped_gemm_default_config(e, params):
+def k_grouped_gemm_default_config(e, params, dtype):
     BLOCK_M = 128
     BLOCK_N = 256
     BLOCK_K = 32
+    if dtype == torch.float32:
+        BLOCK_N /= 2
     num_stages = 5
     default_config = triton.Config({
             "BLOCK_M": BLOCK_M, 
@@ -295,9 +297,9 @@ def k_grouped_gemm(
     _, m = a.size()
     _, n = b.size()
 
-    out = torch.ones((group_indices.size(0) - 1, m, n), device=a.device, dtype=a.dtype)
+    out = torch.empty((group_indices.size(0) - 1, m, n), device=a.device, dtype=a.dtype)
 
-    default_config = k_grouped_gemm_default_config(group_indices.size(0) - 1, params)
+    default_config = k_grouped_gemm_default_config(group_indices.size(0) - 1, params, a.dtype)
     default_kwargs = default_config.all_kwargs()
     func = k_grouped_gemm_persistent_kernel
     if autotune_mode == AutotuneMode.FAST:
