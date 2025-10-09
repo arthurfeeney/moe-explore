@@ -36,11 +36,11 @@ def k_grouped_gemm_inner_kernel(
     last_problem_end,
     # Input parameters
     a_ptr,
-    a_strides,
+    a_stride_1, a_stride_2,
     b_ptr,
-    b_strides,
+    b_stride_1, b_stride_2,
     out_ptr,
-    out_strides,
+    out_stride_1, out_stride_2, out_stride_3,
     group_indices_ptr,
     permute_indices_ptr,
     M: tl.constexpr,
@@ -103,12 +103,12 @@ def k_grouped_gemm_inner_kernel(
         # going to be more complicated than I thought...
         # NOTE: the GATHER_A and GATHER_B are currently unused.
         
-        a_row_offsets = (start_idx + k_offset) * a_strides[0]
-        a_col_offsets = tile_m_offsets * a_strides[1]
+        a_row_offsets = (start_idx + k_offset) * a_stride_1
+        a_col_offsets = tile_m_offsets * a_stride_2
         a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
 
-        b_row_offsets = (start_idx + k_offset) * b_strides[0]
-        b_col_offsets = tile_n_offsets * b_strides[1]            
+        b_row_offsets = (start_idx + k_offset) * b_stride_1
+        b_col_offsets = tile_n_offsets * b_stride_2            
         b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
 
         MASK_N: tl.constexpr = N % BLOCK_N != 0
@@ -137,8 +137,8 @@ def k_grouped_gemm_inner_kernel(
 
             acc = tl.dot(a_block.T, b_block, acc=acc, input_precision="ieee")
             
-            a_ptrs += BLOCK_K * a_strides[0]
-            b_ptrs += BLOCK_K * b_strides[0]
+            a_ptrs += BLOCK_K * a_stride_1
+            b_ptrs += BLOCK_K * b_stride_1
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
@@ -153,10 +153,10 @@ def k_grouped_gemm_inner_kernel(
         out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
 
         out_row_offsets = tile_m_offsets
-        out_offsets = problem_id * out_strides[0] + out_row_offsets[:, None] * out_strides[1] + out_tile_n_offsets * out_strides[2]
+        out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
         out_ptrs = out_ptr + out_offsets
 
-        store_split_epilogue(out_ptrs, out_strides[2], out_m_mask, N, accs)
+        store_split_epilogue(out_ptrs, out_stride_3, out_m_mask, N, accs)
 
         tile_id += NUM_PROGRAMS
     
@@ -165,11 +165,11 @@ def k_grouped_gemm_inner_kernel(
 @triton.jit
 def k_grouped_gemm_persistent_kernel(
     a_ptr,
-    a_strides,
+    a_stride_1, a_stride_2,
     b_ptr,
-    b_strides,
+    b_stride_1, b_stride_2,
     out_ptr,
-    out_strides,
+    out_stride_1, out_stride_2, out_stride_3,
     group_indices_ptr,
     permute_indices_ptr,
     NUM_TOKENS: tl.constexpr,
@@ -194,12 +194,13 @@ def k_grouped_gemm_persistent_kernel(
     last_problem_end = 0
 
     tl.assume(tile_id >= 0)
-    tl.assume(a_strides[0] > 0)
-    tl.assume(a_strides[1] > 0)
-    tl.assume(b_strides[0] > 0)
-    tl.assume(b_strides[1] > 0)
-    tl.assume(out_strides[0] > 0)
-    tl.assume(out_strides[1] > 0)
+    tl.assume(a_stride_1 > 0)
+    tl.assume(a_stride_2 > 0)
+    tl.assume(b_stride_1 > 0)
+    tl.assume(b_stride_2 > 0)
+    tl.assume(out_stride_1 > 0)
+    tl.assume(out_stride_2 > 0)
+    tl.assume(out_stride_3 > 0)
     
     #start_idx = 0
     for problem_id in tl.range(0, NUM_EXPERTS):
@@ -219,11 +220,11 @@ def k_grouped_gemm_persistent_kernel(
             end_idx,
             last_problem_end,
             a_ptr,
-            a_strides,
+            a_stride_1, a_stride_2,
             b_ptr,
-            b_strides,
+            b_stride_1, b_stride_2,
             out_ptr,
-            out_strides,
+            out_stride_1, out_stride_2, out_stride_3,
             group_indices_ptr,
             permute_indices_ptr,
             M,
@@ -303,13 +304,15 @@ def k_grouped_gemm(
 
     default_config = k_grouped_gemm_default_config(group_indices.size(0) - 1, params, a.dtype)
     default_kwargs = default_config.all_kwargs()
+    del default_kwargs["num_ctas"]
+    
     func = k_grouped_gemm_persistent_kernel
-    if autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_k_grouped_gemm_persistent_kernel
-        default_kwargs = {}
-    elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_k_grouped_gemm_persistent_kernel
-        default_kwargs = {}
+    #if autotune_mode == AutotuneMode.FAST:
+    #    func = _fast_autotune_k_grouped_gemm_persistent_kernel
+    #    default_kwargs = {}
+    #elif autotune_mode == AutotuneMode.MAX:
+    #    func = _max_autotune_k_grouped_gemm_persistent_kernel
+    #    default_kwargs = {}
         
     epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
         
@@ -317,11 +320,11 @@ def k_grouped_gemm(
         
     func[grid](
         a, 
-        a.stride(),
+        a.stride(0), a.stride(1),
         b,
-        b.stride(),
+        b.stride(0), b.stride(1),
         out,
-        out.stride(),
+        out.stride(0), out.stride(1), out.stride(2),
         group_indices, 
         params.permute_indices, 
         NUM_TOKENS=num_tokens,

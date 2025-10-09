@@ -43,11 +43,11 @@ def m_grouped_gemm_inner_kernel(
     last_problem_end,
     # Input parameters
     a_ptr,
-    a_strides,
+    a_stride_1, a_stride_2,
     b_ptr,
-    b_strides,
+    b_stride_1, b_stride_2, b_stride_3,
     out_ptr,
-    out_strides,
+    out_stride_1, out_stride_2,
     group_indices_ptr,
     permute_indices_ptr,
     m,
@@ -115,20 +115,20 @@ def m_grouped_gemm_inner_kernel(
         k_offset = tl.arange(0, BLOCK_K)
 
         if IS_A_TRANSPOSED:
-            a_row_offsets = k_offset * a_strides[0]
-            a_col_offsets = a_indices * a_strides[1]
+            a_row_offsets = k_offset * a_stride_1
+            a_col_offsets = a_indices * a_stride_2
         else:
-            a_row_offsets = a_indices * a_strides[0]
-            a_col_offsets = k_offset * a_strides[1]
+            a_row_offsets = a_indices * a_stride_1
+            a_col_offsets = k_offset * a_stride_2
         a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
 
-        b_problem_offset = problem_id * b_strides[0]
+        b_problem_offset = problem_id * b_stride_1
         if IS_B_TRANSPOSED:
-            b_row_offsets = tile_n_offsets * b_strides[1]
-            b_col_offsets = k_offset * b_strides[2]
+            b_row_offsets = tile_n_offsets * b_stride_2
+            b_col_offsets = k_offset * b_stride_3
         else:
-            b_row_offsets = k_offset * b_strides[1]
-            b_col_offsets = tile_n_offsets * b_strides[2]            
+            b_row_offsets = k_offset * b_stride_2
+            b_col_offsets = tile_n_offsets * b_stride_3            
         b_ptrs = b_ptr + b_problem_offset + b_row_offsets[:, None] + b_col_offsets
         
         MASK_N: tl.constexpr = N % BLOCK_N != 0
@@ -179,13 +179,13 @@ def m_grouped_gemm_inner_kernel(
             acc = tl.dot(a_block, b_block, acc=acc, input_precision="ieee")
             
             if IS_A_TRANSPOSED:
-                a_ptrs += BLOCK_K * a_strides[0]
+                a_ptrs += BLOCK_K * a_stride_1
             else:
-                a_ptrs += BLOCK_K * a_strides[1]        
+                a_ptrs += BLOCK_K * a_stride_2        
             if IS_B_TRANSPOSED:
-                b_ptrs += BLOCK_K * b_strides[2]
+                b_ptrs += BLOCK_K * b_stride_3
             else:
-                b_ptrs += BLOCK_K * b_strides[1]
+                b_ptrs += BLOCK_K * b_stride_2
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
@@ -202,14 +202,14 @@ def m_grouped_gemm_inner_kernel(
         if SCATTER_ROWS:    
             # Can avoid masking, since offsets are 0 <= tile_m_offsets < m
             permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)     
-            out_offsets = permute_a_indices[:, None] * out_strides[0] + out_tile_n_offsets * out_strides[1]
+            out_offsets = permute_a_indices[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
             out_ptrs = out_ptr + out_offsets
         else:
             out_row_offsets = start_idx + tile_m_offsets
-            out_offsets = out_row_offsets[:, None] * out_strides[0] + out_tile_n_offsets * out_strides[1]
+            out_offsets = out_row_offsets[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
             out_ptrs = out_ptr + out_offsets
 
-        store_split_epilogue(out_ptrs, out_strides[1], a_mask, N, accs)
+        store_split_epilogue(out_ptrs, out_stride_2, a_mask, N, accs)
 
         tile_id += NUM_PROGRAMS
     
@@ -218,11 +218,11 @@ def m_grouped_gemm_inner_kernel(
 @triton.jit
 def m_grouped_gemm_persistent_kernel(
     a_ptr,
-    a_strides,
+    a_stride_1, a_stride_2,
     b_ptr,
-    b_strides,
+    b_stride_1, b_stride_2, b_stride_3,
     out_ptr,
-    out_strides,
+    out_stride_1, out_stride_2,
     group_indices_ptr,
     permute_indices_ptr,
     NUM_TOKENS: tl.constexpr,
@@ -249,13 +249,13 @@ def m_grouped_gemm_persistent_kernel(
     last_problem_end = 0
 
     tl.assume(tile_id >= 0)
-    tl.assume(a_strides[0] > 0)
-    tl.assume(a_strides[1] > 0)
-    tl.assume(b_strides[0] > 0)
-    tl.assume(b_strides[1] > 0)
-    tl.assume(b_strides[2] > 0)
-    tl.assume(out_strides[0] > 0)
-    tl.assume(out_strides[1] > 0)
+    tl.assume(a_stride_1 > 0)
+    tl.assume(a_stride_2 > 0)
+    tl.assume(b_stride_1 > 0)
+    tl.assume(b_stride_2 > 0)
+    tl.assume(b_stride_3 > 0)
+    tl.assume(out_stride_1 > 0)
+    tl.assume(out_stride_2 > 0)
     
     start_idx = 0
     for problem_id in tl.range(0, NUM_EXPERTS):
@@ -283,11 +283,11 @@ def m_grouped_gemm_persistent_kernel(
             end_idx,
             last_problem_end,
             a_ptr,
-            a_strides,
+            a_stride_1, a_stride_2,
             b_ptr,
-            b_strides,
+            b_stride_1, b_stride_2, b_stride_3,
             out_ptr,
-            out_strides,
+            out_stride_1, out_stride_2,
             group_indices_ptr,
             permute_indices_ptr,
             m,
@@ -406,13 +406,16 @@ def m_grouped_gemm(
 
     default_config = m_grouped_gemm_default_config(b.size(0), params, a.dtype)
     default_kwargs = default_config.all_kwargs()
+    # torch.compile(fullgraph=True) does not supporting passing in num_ctas
+    del default_kwargs["num_ctas"]
+    
     func = m_grouped_gemm_persistent_kernel
-    if autotune_mode == AutotuneMode.FAST:
-        func = _fast_autotune_m_grouped_gemm_persistent_kernel
-        default_kwargs = {}
-    elif autotune_mode == AutotuneMode.MAX:
-        func = _max_autotune_m_grouped_gemm_persistent_kernel
-        default_kwargs = {}
+    #if autotune_mode == AutotuneMode.FAST:
+    #    func = _fast_autotune_m_grouped_gemm_persistent_kernel
+    #    default_kwargs = {}
+    #elif autotune_mode == AutotuneMode.MAX:
+    #    func = _max_autotune_m_grouped_gemm_persistent_kernel
+    #    default_kwargs = {}
         
     epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
             
@@ -420,11 +423,12 @@ def m_grouped_gemm(
 
     func[grid](
         a, 
-        a.stride(),
+        # torch.compile(fullgraph=True) does not supporting passing in tuples
+        a.stride(0), a.stride(1),
         b,
-        b.stride(),
+        b.stride(0), b.stride(1), b.stride(2),
         out,
-        out.stride(),
+        out.stride(0), out.stride(1),
         group_indices, 
         params.permute_indices, 
         NUM_TOKENS=num_tokens,
