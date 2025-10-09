@@ -20,36 +20,34 @@ def m_grouped_mlp_forward(
     assert group_indices.size(0) == weight1.size(0) + 1
     assert group_indices.size(0) == weight2.size(0) + 1
     assert num_tokens > 0 and topk > 0
-    with proton.scope("mlp_forward_weight1"):
-        pre_activation = m_grouped_gemm_forward(
-            tokens,
-            weight1,
-            group_indices,
-            permute_indices=permute_indices,
-            gather=permute_indices is not None,
-            scatter=False,
-            num_tokens=num_tokens,
-            topk=topk,
-            activation=None#activation
-        )
+    pre_activation = m_grouped_gemm_forward(
+        tokens,
+        weight1,
+        group_indices,
+        permute_indices=permute_indices,
+        gather=permute_indices is not None,
+        scatter=False,
+        num_tokens=num_tokens,
+        topk=topk,
+        activation=None#activation
+    )
 
     if activation is not None:
         intermediate = activation_func(pre_activation, activation)
     else:
         intermediate = pre_activation
     
-    with proton.scope("mlp_forward_weight2"):
-        output = m_grouped_gemm_forward(
-            intermediate,
-            weight2,
-            group_indices,
-            permute_indices=permute_indices,
-            gather=False,
-            scatter=permute_indices is not None,
-            num_tokens=num_tokens,
-            topk=topk,
-            activation=None
-        )
+    output = m_grouped_gemm_forward(
+        intermediate,
+        weight2,
+        group_indices,
+        permute_indices=permute_indices,
+        gather=False,
+        scatter=permute_indices is not None,
+        num_tokens=num_tokens,
+        topk=topk,
+        activation=None
+    )
 
     # The intermediate state is returned for the backward pass.
     return output, pre_activation
