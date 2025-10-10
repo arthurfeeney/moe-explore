@@ -26,6 +26,8 @@ import pytest
     # TODO: Group size one is broken.
     #(1000, 1, 1024, 1024, "geglu", torch.bfloat16),
     (1000, 2, 300, 20, "gelu", torch.bfloat16),
+    # Check sizes that need masking
+    (1000, 2, 1000, 1000, "gelu", torch.float32),
 ])
 def test_m_grouped_gemm(
     num_tokens: int,
@@ -131,15 +133,16 @@ def test_m_grouped_gemm_zeros(
     assert (out == 0).all()
 
 parameters = "num_tokens,num_experts,topk,K,N,activation,dtype"
-test_cases = [
+gather_scatter_test_cases = [
     (10, 4, 2, 128, 128, None, torch.bfloat16),
     (200, 4, 2, 512, 512, None, torch.bfloat16),
     (200, 4, 2, 512, 512, "gelu", torch.bfloat16),
     (200, 4, 2, 512, 512, "swiglu", torch.bfloat16),
     (200, 4, 2, 512, 512, "geglu", torch.bfloat16),
+    (1000, 4, 2, 1000, 1000, "gelu", torch.float32),
 ]
 
-@pytest.mark.parametrize(parameters, test_cases)
+@pytest.mark.parametrize(parameters, gather_scatter_test_cases)
 def test_m_grouped_gemm_gather(
     num_tokens: int,
     num_experts: int,
@@ -176,7 +179,7 @@ def test_m_grouped_gemm_gather(
     assert out.isfinite().all() and ref.isfinite().all()
     assert_close(out, ref)
 
-@pytest.mark.parametrize(parameters, test_cases)
+@pytest.mark.parametrize(parameters, gather_scatter_test_cases)
 def test_m_grouped_gemm_scatter(
     num_tokens: int,
     num_experts: int,
