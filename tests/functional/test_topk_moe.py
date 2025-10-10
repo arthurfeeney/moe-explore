@@ -45,6 +45,9 @@ def test_topk_moe(
     topk,
     dtype
 ):
+    # We need to rerun the full torch.compile for each input.
+    torch._dynamo.reset()
+    
     input = torch.randn((seq_len, input_dim), device="cuda", dtype=dtype)
     mlp_func = random_interleaved_glu if "glu" in activation else random_mlp
     mlp_params = mlp_func(num_experts, input_dim, hidden_dim, activation, device="cuda", dtype=dtype)

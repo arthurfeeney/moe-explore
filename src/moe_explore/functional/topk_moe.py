@@ -5,7 +5,6 @@ from moe_explore.functional.activation import activation
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices
-#from moe_explore.functional.m_grouped_gemm import m_grouped_gemm
 from moe_explore.functional.m_grouped_mlp import m_grouped_mlp
 from moe_explore.expert_permute import expert_input_permute, expert_output_permute
 
