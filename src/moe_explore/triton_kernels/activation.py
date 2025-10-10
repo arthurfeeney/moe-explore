@@ -1,3 +1,4 @@
+from torch._refs import reshape_as
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
@@ -54,9 +55,8 @@ def swiglu(tile):
 def grad_swiglu(tile):
     tile = tl.reshape(tile, (tile.shape[0], tile.shape[1] // 2, 2))
     tile0, tile1 = tl.split(tile)
-    tile0 = grad_silu(tile0)
-    return tile0 * tile1
-    
+    return tl.interleave(grad_silu(tile0) * tile1, silu(tile0))
+
 @triton.jit
 def geglu(tile):
     tile = tl.reshape(tile, (tile.shape[0], tile.shape[1] // 2, 2))
@@ -64,6 +64,12 @@ def geglu(tile):
     tile0 = gelu(tile0)
     return tile0 * tile1
     
+@triton.jit
+def grad_geglu(tile):
+    tile = tl.reshape(tile, (tile.shape[0], tile.shape[1] // 2, 2))
+    tile0, tile1 = tl.split(tile)
+    return tl.interleave(grad_gelu(tile0) * tile1, gelu(tile0))
+
 TRITON_ACTIVATIONS = {
     "none": None,
     "relu": relu,
@@ -75,4 +81,6 @@ TRITON_ACTIVATIONS = {
     "geglu": geglu,
     "grad_silu": grad_silu,
     "grad_gelu": grad_gelu,
+    "grad_swiglu": grad_swiglu,
+    "grad_geglu": grad_geglu,
 }

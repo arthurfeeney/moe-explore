@@ -14,6 +14,8 @@ class Activation(StrEnum):
     GRAD_RELU = "grad_relu"
     GRAD_SILU = "grad_silu"
     GRAD_GELU = "grad_gelu"
+    GRAD_SWIGLU = "grad_swiglu"
+    GRAD_GEGLU = "grad_geglu"
 
 @torch.compile
 def grad_relu(x: torch.Tensor):
@@ -37,22 +39,31 @@ def grad_gelu(x: torch.Tensor):
 
 @torch.compile
 def swiglu(x: torch.Tensor):
-    assert x.shape[-1] % 2 == 0
     gate = x[..., 0::2]
     up = x[..., 1::2]
     return torch.nn.functional.silu(gate) * up
 
 @torch.compile
+def grad_swiglu(pre_activated: torch.Tensor):
+    gate = pre_activated[..., 0::2]
+    up = pre_activated[..., 1::2]
+    return torch.stack([grad_silu(gate) * up, torch.nn.functional.silu(gate)], dim=-1).view(pre_activated.shape)
+    
+@torch.compile
 def geglu(x: torch.Tensor):
-    assert x.shape[-1] % 2 == 0
     gate = x[..., 0::2]
     up = x[..., 1::2]
     return torch.nn.functional.gelu(gate) * up
+
+@torch.compile
+def grad_geglu(pre_activated: torch.Tensor):
+    gate = pre_activated[..., 0::2]
+    up = pre_activated[..., 1::2]
+    return torch.stack([grad_gelu(gate) * up, torch.nn.functional.gelu(gate)], dim=-1).view(pre_activated.shape)
     
 def activation(x: torch.Tensor, act: Optional[Activation] = None):
     if act is None or act == Activation.NONE:
         return x
-    #assert act in Activation, f"Invalid activation: {act}"
     if act == Activation.RELU:
         return torch.nn.functional.relu(x)
     elif act == Activation.SILU:
@@ -69,4 +80,8 @@ def activation(x: torch.Tensor, act: Optional[Activation] = None):
         return grad_silu(x)
     elif act == Activation.GRAD_GELU:
         return grad_gelu(x)
+    elif act == Activation.GRAD_SWIGLU:
+        return grad_swiglu(x)
+    elif act == Activation.GRAD_GEGLU:
+        return grad_geglu(x)
     assert_never(act)
