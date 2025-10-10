@@ -89,6 +89,8 @@ def m_grouped_mlp_backward(
     # In the forward pass, Intermediate did NOT have the activation applied.
     if activation is not None:
         grad_activation: Optional[str] = "grad_" + activation if activation is not None else None
+        if "glu" in activation:
+            grad_intermediate = grad_intermediate.repeat_interleave(2, dim=-1)
         grad_intermediate = grad_intermediate * activation_func(intermediate, grad_activation)
 
     grad_tokens, grad_weight1 = m_grouped_gemm_backward(
