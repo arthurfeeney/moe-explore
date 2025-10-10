@@ -11,16 +11,27 @@ from moe_explore.params import MOEParams
 from moe_explore.testing import random_mlp, random_topk_router, assert_close, random_interleaved_glu
 
 test_params = [
-    (128, 128, 256, "relu", 8, 2, torch.float16),
-    (128, 128, 256, "silu", 8, 2, torch.float16),
-    (256, 1024, 1024, "relu", 8, 2, torch.float16),
-    (999, 1024, 1024, "silu", 8, 2, torch.float16),
-    
-    # Run lots of tests in float32 since we test a chain with a lot of floating point operations.
+    # This test runs the full forward and backward pass. With low precision and
+    # larger weights, the errors accumulate by the time we're in the last part
+    # of the backward pass. So, for lower precision, we only test smaller weights.
+    (128, 128, 128, "relu", 8, 2, torch.float16),
+    (128, 128, 128, "silu", 8, 2, torch.float16),
+    (128, 128, 128, "relu", 8, 2, torch.float16),
+    (128, 128, 128, "silu", 8, 2, torch.float16),
+    (128, 128, 128, "gelu", 8, 2, torch.float16),
+    (128, 128, 128, "swiglu", 8, 2, torch.float16),
+    (128, 128, 128, "geglu", 8, 2, torch.float16),
+    # Run lots of tests in float32 since floating point errors don't accumulate as much.
+    (999, 1024, 1024, "relu", 8, 2, torch.float32),
     (999, 1024, 1024, "silu", 8, 2, torch.float32),
-    (999, 1024, 1024, "silu", 8, 2, torch.float32),
-    (999, 1024, 1024, "silu", 8, 2, torch.float32),
-    (999, 1024, 1024, "silu", 8, 2, torch.float32),
+    (1024, 1024, 1000, "gelu", 8, 2, torch.float32),
+    (999, 1024, 1024, "swiglu", 8, 2, torch.float32),
+    (999, 1000, 1000, "geglu", 8, 2, torch.float32),
+    (999, 1000, 1000, "relu", 64, 8, torch.float32),
+    (999, 1000, 1000, "silu", 64, 8, torch.float32),
+    (999, 1000, 1000, "gelu", 64, 8, torch.float32),
+    (999, 1000, 1000, "swiglu", 64, 8, torch.float32),
+    (999, 1000, 1000, "geglu", 64, 8, torch.float32),
 ]
 
 @pytest.mark.parametrize(

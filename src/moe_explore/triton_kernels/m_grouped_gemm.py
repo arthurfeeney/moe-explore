@@ -209,7 +209,7 @@ def m_grouped_gemm_inner_kernel(
             out_offsets = out_row_offsets[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
             out_ptrs = out_ptr + out_offsets
 
-        store_split_epilogue(out_ptrs, out_stride_2, a_mask, N, accs)
+        store_split_epilogue(out_ptrs, out_stride_2, a_mask, N - tile_n_idx, accs)
 
         tile_id += NUM_PROGRAMS
     
