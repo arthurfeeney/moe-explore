@@ -156,7 +156,7 @@ def k_grouped_gemm_inner_kernel(
         out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
         out_ptrs = out_ptr + out_offsets
 
-        store_split_epilogue(out_ptrs, out_stride_3, out_m_mask, N, accs)
+        store_split_epilogue(out_ptrs, out_stride_3, out_m_mask, N - tile_n_idx, accs)
 
         tile_id += NUM_PROGRAMS
     

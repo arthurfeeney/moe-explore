@@ -293,9 +293,11 @@ def assert_close(a, b, atol=None, rtol=None):
     # values. A matrix with larger values and K-dimension will accumulate
     # more floating point errors... This tries to set tolerances
     # based on the dtype's epsilon, k-dimension, and max value.
-    k = a.size(-1)
     if atol is None:
-        atol = 2e-2
+        if a.dtype is not torch.float32:
+            atol = 2e-2
+        else:
+            atol = 1e-4
     if rtol is None:    
         if a.dtype is torch.bfloat16:
             eps = 0.0078125
@@ -305,5 +307,6 @@ def assert_close(a, b, atol=None, rtol=None):
             eps = 1e-6
         else:
             raise ValueError(f"Invalid dtype: {a.dtype}")
+        k = a.size(-1)
         rtol = math.log10(k) * eps
     torch.testing.assert_close(a, b, atol=atol, rtol=rtol)

@@ -9,6 +9,13 @@ def epilogue_split(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr
 ):
+    r"""
+    This breaks a 2d accumulator `acc` into `EPILOGUE_SPLIT` parts.
+    and then applies the epilogue to each part. This assumes the
+    epilogue function is splitable. I.e., element-wise operations
+    or the GLUs should both work.
+    if `EPILOGUE_SPLIT == 1`, then we just return a tuple with one element.
+    """
     tl.static_assert(EPILOGUE_SPLIT == 1 or EPILOGUE_SPLIT == 2, "EPILOGUE_SPLIT must be 1 or 2")
     if EPILOGUE_SPLIT == 2:
         acc = tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2))
@@ -39,5 +46,4 @@ def store_split_epilogue(
         tl.store(
             out_ptrs + epilogue_split_offset * out_stride, 
             out, 
-            mask=m_mask[:, None] & (epilogue_split_offset + n_offset < N),
-            cache_modifier=".cs")
+            mask=m_mask[:, None] & (epilogue_split_offset + n_offset < N))
