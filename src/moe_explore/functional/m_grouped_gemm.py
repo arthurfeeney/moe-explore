@@ -57,7 +57,7 @@ def m_grouped_gemm_backward(
     grad_token_params = MGroupedGEMMParams(
         # TODO: This * topk is used because inside the kernel the gather // topk...
         # Since the grad_output is the otuput of grad(scale_and_reduce), we do not want
-        # to divide by topk inside the kernel.
+        # to divide by topk inside the kernel. This should just be toggled inside the kernel.
         permute_indices=permute_indices * topk if forward_scatter else permute_indices,
         gather=forward_scatter,
         scatter=forward_gather,
@@ -74,24 +74,24 @@ def m_grouped_gemm_backward(
     
     # reorder data into groups.
     # TODO: these are tricky to fuse with k_grouped_gemm
-    if forward_gather:
-        tokens_gather = tokens[permute_indices // topk]
-    else:
-        tokens_gather = tokens
-    if forward_scatter:
-        grad_output_gather = grad_output[permute_indices]
-    else:
-        grad_output_gather = grad_output
+    #if forward_gather:
+    #    tokens_gather = tokens[permute_indices // topk]
+    #else:
+    #    tokens_gather = tokens
+    #if forward_scatter:
+    #    grad_output_gather = grad_output[permute_indices]
+    #else:
+    #    grad_output_gather = grad_output
         
     grad_weight_params = KGroupedGEMMParams(
         permute_indices=permute_indices,
-        gather_a=False,
-        gather_b=False,
+        gather_a=forward_gather,
+        gather_b=forward_scatter,
         num_tokens=num_tokens,
         topk=topk,
         activation=None
     )
-    grad_weight = triton_k_grouped_gemm(tokens_gather, grad_output_gather, group_indices, grad_weight_params)
+    grad_weight = triton_k_grouped_gemm(tokens, grad_output, group_indices, grad_weight_params)
 
     return grad_tokens, grad_weight
 

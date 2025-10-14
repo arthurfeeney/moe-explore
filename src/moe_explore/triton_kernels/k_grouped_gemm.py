@@ -59,7 +59,7 @@ def k_grouped_gemm_inner_kernel(
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
     USE_TENSOR_DESCRIPTOR: tl.constexpr,
-):          
+):
     num_m_tiles = tl.cdiv(M, BLOCK_M)
     num_n_tiles = tl.cdiv(N, BLOCK_N)    
     num_tiles = num_m_tiles * num_n_tiles
@@ -96,49 +96,61 @@ def k_grouped_gemm_inner_kernel(
         tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
         tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets % N, BLOCK_N), BLOCK_N)
 
-        k_offset = tl.arange(0, BLOCK_K)
-
-        # NOTE: The kernel has to step DOWN the permute_indices... That's kind of bad...?
-        # We have to load the permute indices inside the inner loop... This kernel is
-        # going to be more complicated than I thought...
-        # NOTE: the GATHER_A and GATHER_B are currently unused.
+        # NOTE: The kernel has to step DOWN the permute_indices... 
+        # We have to load the permute indices inside the inner loop...
         
-        a_row_offsets = (start_idx + k_offset) * a_stride_1
-        a_col_offsets = tile_m_offsets * a_stride_2
-        a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
-
-        b_row_offsets = (start_idx + k_offset) * b_stride_1
-        b_col_offsets = tile_n_offsets * b_stride_2            
-        b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
-
-        MASK_N: tl.constexpr = N % BLOCK_N != 0
-
+        k_offset = tl.arange(0, BLOCK_K)
+        
+        if not GATHER_A:
+            a_row_offsets = (start_idx + k_offset) * a_stride_1
+            a_col_offsets = tile_m_offsets * a_stride_2
+            a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
+        #else:
+        #    a_ptrs = tl.zeros((BLOCK_K, BLOCK_M), dtype=a_ptr.dtype)
+        if not GATHER_B:
+            b_row_offsets = (start_idx + k_offset) * b_stride_1
+            b_col_offsets = tile_n_offsets * b_stride_2            
+            b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
+        #else:
+        #    b_ptrs = tl.zeros((BLOCK_K, BLOCK_N), dtype=b_ptr.dtype)
+                
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_iter in tl.range(0, tl.cdiv(k, BLOCK_K)):
-            tl.multiple_of(a_ptrs, [16, 16])
-            tl.multiple_of(b_ptrs, [16, 16])
+            # TODO: don't like this! Should pre-allocate pointers/??
+            if not GATHER_A:
+                tl.multiple_of(a_ptrs, [16, 16])
+            if not GATHER_B:
+                tl.multiple_of(b_ptrs, [16, 16])
             
-            k_remaining = k - k_iter * BLOCK_K
+            k_step_offset = start_idx + tl.arange(0, BLOCK_K) + k_iter * BLOCK_K
+            k_mask = k_step_offset < end_idx
+            
+            a_mask = k_mask[:, None] & (tile_m_offsets < M)
+            b_mask = k_mask[:, None] & (tile_n_offsets < N)
+        
+            if GATHER_A or GATHER_B:
+                gather_indices = tl.load(permute_indices_ptr + k_step_offset,
+                                         cache_modifier=".ca")
+            if GATHER_A:
+                a_row_offsets = (gather_indices // TOPK) * a_stride_1
+                a_col_offsets = tile_m_offsets * a_stride_2
+                a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
+                tl.multiple_of(a_ptrs, [16, 16])
+            if GATHER_B:
+                b_row_offsets = gather_indices * b_stride_1
+                b_col_offsets = tile_n_offsets * b_stride_2
+                b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
+                tl.multiple_of(b_ptrs, [16, 16])
 
-            if MASK_N:
-                a_mask = (k_offset < k_remaining)[:, None] & (tile_m_offsets < M)
-                b_mask = (k_offset < k_remaining)[:, None] & (tile_n_offsets < N)
-            else:
-                a_mask = (k_offset < k_remaining)[:, None] & (tile_m_offsets < M)
-
-            # TODO: this branch may not be necessary if triton is able
-            # to optimize away the masking on its own.
-            if MASK_N:
-                a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
-                b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
-            else:
-                a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
-                b_block = tl.load(b_ptrs)
-
+            a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
+            b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            
             acc = tl.dot(a_block.T, b_block, acc=acc, input_precision="ieee")
-            
-            a_ptrs += BLOCK_K * a_stride_1
-            b_ptrs += BLOCK_K * b_stride_1
+           
+            if not GATHER_A:
+                a_ptrs += BLOCK_K * a_stride_1
+            if not GATHER_B:
+                b_ptrs += BLOCK_K * b_stride_1
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
@@ -202,7 +214,6 @@ def k_grouped_gemm_persistent_kernel(
     tl.assume(out_stride_2 > 0)
     tl.assume(out_stride_3 > 0)
     
-    #start_idx = 0
     for problem_id in tl.range(0, NUM_EXPERTS):
         group_bounds = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2), cache_modifier=".ca")
         start_idx, end_idx = group_bounds.split()
