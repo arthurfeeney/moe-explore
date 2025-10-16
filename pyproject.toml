@@ -24,19 +24,31 @@ dependencies = [
 tests = [
   # models from transformers are used as reference implementations.
   "transformers",
+  "lm_eval",
 ]
 bench = [
   # transformers and some inference engines are used for performance comparisons.
   "transformers",
   "llnl-hatchet", # used by proton-viewer
-  "pynvml"
+  #"megablocks[gg]==0.10.0", # dmoe can use grouped gemm
+  #"megatron-core",
+  "pynvml",
+  "scattermoe",
+  #"transformer-engine[pytorch]" # used by megatron
 ]
 scripts = [
   "accelerate",
   "datasets",
   "transformers",
 ]
-all = ["moe_explore[tests]", "moe_explore[bench]", "moe_explore[scripts]"]
+all = [
+  "moe_explore[tests]", 
+  "moe_explore[bench]", 
+  "moe_explore[scripts]"
+]
+
+[tool.uv]
+no-build-isolation-package = ["transformer-engine"]
 
 [tool.uv.sources]
 torch = [
@@ -48,6 +60,7 @@ torchvision = [
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
   { index = "pytorch-cu126", marker = "sys_platform == 'linux'" },
 ]
+scattermoe = { git = "https://github.com/shawntan/scattermoe.git" }
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
