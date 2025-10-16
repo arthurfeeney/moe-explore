@@ -9,6 +9,7 @@ from moe_explore.functional.activation import activation
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups, assert_close
 import pytest
+from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
 
 @pytest.mark.parametrize("num_tokens,num_experts,K,N,activation,dtype", [
     (10, 4, 128, 128, None, torch.bfloat16),
@@ -42,7 +43,6 @@ def test_m_grouped_gemm(
     It is not really testing part of an MoE, since it does no routing.
     If one had a hypothetical three-layer MLP, something like this could be the middle layer.
     """
-    assert torch.cuda.is_available()
     input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
     weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N)
     group_indices = random_groups(num_tokens, num_experts, device="cuda")
@@ -152,7 +152,6 @@ def test_m_grouped_gemm_gather(
     activation,
     dtype: torch.dtype
 ):
-    assert torch.cuda.is_available()
     input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
     weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
     _, topk_indices = random_routing(num_tokens, num_experts, topk, device="cuda", dtype=dtype)
@@ -189,7 +188,6 @@ def test_m_grouped_gemm_scatter(
     activation,
     dtype: torch.dtype
 ):
-    assert torch.cuda.is_available()
     num_tokens_times_topk = num_tokens * topk
     input = torch.randn((num_tokens_times_topk, K), dtype=dtype, device="cuda")
     weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N) 
@@ -284,3 +282,45 @@ def test_m_grouped_gemm_layouts(
     
     assert out.isfinite().all() and ref.isfinite().all()
     assert_close(out, ref)
+    
+def test_te_grouped_linear():
+    num_tokens = 1000
+    num_experts = 16
+    K = 128
+    N = 256
+    activation = None
+    dtype = torch.bfloat16
+    
+    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N)
+    group_indices = random_groups(num_tokens, num_experts, device="cuda")
+    params = MGroupedGEMMParams(
+        None,
+        False,
+        False,
+        num_tokens,
+        topk=1,
+        scales=None,
+        activation=activation
+    )
+    out = m_grouped_gemm(input, weight, group_indices, params)
+    
+    grouped_linear = GroupedLinear(num_experts, K, N, bias=False, params_dtype=dtype)
+    
+    
+    print(grouped_linear.weight1.data[0, :5])
+    
+    for i in range(num_experts):
+        getattr(grouped_linear, f"weight{i}").data[:] = weight[i].t()
+    
+    print(weight[0, 0, :5])
+    print(grouped_linear.weight1.data[0, :5])
+    
+    m_splits = (group_indices[1:] - group_indices[:-1]).tolist()
+    ref = grouped_linear(input, m_splits=m_splits, is_first_microbatch=None)
+    
+    assert out.isfinite().all() and ref.isfinite().all()
+    assert_close(out, ref)
+    
+    
+    

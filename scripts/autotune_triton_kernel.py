@@ -16,8 +16,8 @@ from moe_explore.testing import random_routing, random_skewed_routing, perfect_r
 def router(router_name: str, *args, **kwargs):
     if router_name == "random":
         return random_routing(*args, **kwargs)
-    elif router_name == "skewed":
-        return skewed_routing(*args, **kwargs)
+    #elif router_name == "skewed":
+    #    return skewed_routing(*args, **kwargs)
     elif router_name == "perfect":
         return perfect_routing(*args, **kwargs)
     else:
@@ -44,8 +44,6 @@ def autotune_grouped_gemm(
     )   
 
     params = MGroupedGEMMParams(
-        weight,
-        p.group_indices,
         permute_indices=None,
         gather=False,
         scatter=False,
@@ -54,7 +52,7 @@ def autotune_grouped_gemm(
         scales=None,
     )
     
-    m_grouped_gemm(input, params, AutotuneMode.MAX)
+    m_grouped_gemm(input, weight, p.group_indices, params, AutotuneMode.MAX)
 
 
 def autotune_grouped_gemm_gather(
@@ -78,8 +76,6 @@ def autotune_grouped_gemm_gather(
     )   
 
     params = MGroupedGEMMParams(
-        weight,
-        p.group_indices,
         p.indices,
         True,
         False,
@@ -88,7 +84,7 @@ def autotune_grouped_gemm_gather(
         None
     )
     
-    m_grouped_gemm(input, params, AutotuneMode.MAX)
+    m_grouped_gemm(input, weight, p.group_indices, params, AutotuneMode.MAX)
     
 def autotune_grouped_gemm_scatter(
     num_tokens_times_topk,
@@ -116,8 +112,6 @@ def autotune_grouped_gemm_scatter(
     )
 
     params = MGroupedGEMMParams(
-        weight,
-        p.group_indices,
         p.indices,
         False,  
         True,
@@ -126,78 +120,8 @@ def autotune_grouped_gemm_scatter(
         topk_scores
     )
 
-    m_grouped_gemm(input, params, AutotuneMode.MAX)
-<<<<<<< HEAD
-        
-=======
-    
-def autotune_grouped_glu_gather(
-    num_tokens,
-    num_experts,
-    K,
-    N,
-    topk,
-    dtype,
-    dist,
-    router_name
-):
-    input = dist((num_tokens, K), dtype=dtype, device="cuda")
-    gate_weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
-    up_weight = dist((num_experts, K, N), dtype=dtype, device="cuda")
-    _, topk_indices = router(router_name, num_tokens, num_experts, topk, device="cuda", dtype=dtype)
-    p = get_token_indices(
-        topk_indices.view(-1),
-        topk,
-        num_experts,
-        zero_prefix=True
-    )   
+    m_grouped_gemm(input, weight, p.group_indices, params, AutotuneMode.MAX)
 
-    params = MGroupedGLUParams(
-        gate_weight,
-        up_weight,
-        p.group_indices,
-        p.indices,
-        True,
-        num_tokens,
-        topk,
-        "silu"
-    )
-    
-    m_grouped_glu(input, params, AutotuneMode.MAX)
-    
-def autotune_grouped_glu_interleaved_gather(
-    num_tokens,
-    num_experts,
-    K,
-    N,
-    topk,
-    dtype,
-    dist,
-    router_name
-):
-    input = dist((num_tokens, K), dtype=dtype, device="cuda")
-    weight = dist((num_experts, K, 2 * N), dtype=dtype, device="cuda")
-    _, topk_indices = router(router_name, num_tokens, num_experts, topk, device="cuda", dtype=dtype)
-    p = get_token_indices(
-        topk_indices.view(-1),
-        topk,
-        num_experts,
-        zero_prefix=True
-    )   
-    
-    params = MGroupedGLUInterleavedParams(
-        weight,
-        p.group_indices,
-        p.indices,
-        True,
-        num_tokens,
-        topk,
-        "silu"
-    )
-    
-    m_grouped_glu_interleaved(input, params, AutotuneMode.MAX)
-    
->>>>>>> 2b6c9f0 (support different router distributions in autotuning scripts)
 @dataclass
 class MoESettings:
     num_experts: int
@@ -267,14 +191,6 @@ def main():
         autotune_grouped_gemm_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
     elif args.kernel == "scatter":
         autotune_grouped_gemm_scatter(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
-<<<<<<< HEAD
-        
-=======
-    elif args.kernel == "glu-gather":
-        autotune_grouped_glu_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
-    elif args.kernel == "glu-interleaved-gather":
-        autotune_grouped_glu_interleaved_gather(num_tokens, num_experts, K, N, topk, dtype, init_dist, args.routing)
 
->>>>>>> 2b6c9f0 (support different router distributions in autotuning scripts)
 if __name__ == "__main__":
     main()

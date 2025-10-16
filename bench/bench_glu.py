@@ -1,28 +1,32 @@
 from functools import partial
 import math
+from types import NoneType
 import torch
+from typing import List, Callable
 from triton.testing import perf_report, do_bench, Benchmark
-from moe_explore.functional.glu import (
-        moe_glu_torch,
-        moe_glu_grouped_gemm_fused,
-        moe_glu_grouped_gemm
+from moe_explore.functional.topk_moe import (
+    topk_moe_torch,
+    topk_moe
 )
 from moe_explore.router import topk_router, ernie_router
-from moe_explore.testing import random_glu, random_topk_router, random_ernie_router
+from moe_explore.testing import random_interleaved_glu, random_topk_router, random_ernie_router
 from moe_explore.params import MOEParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 
-import sys
-sys.path.append("./")
-sys.path.append("bench/")
-sys.path.append("bench/external")
+from moe_explore.baseline.huggingface import HAVE_HUGGINGFACE, make_huggingface_moe, set_huggingface_moe_weights
+from moe_explore.baseline.scattermoe import HAVE_SCATTERMOE, make_scattermoe_mlp, scattermoe_forward
+from moe_explore.baseline.transformer_engine import HAVE_TRANSFORMER_ENGINE, TransformerEngineMoE
 
-try:
-    from scattermoe.mlp import GLUMLP as ScatterMoEGLU
-    from external.scattermoe import scattermoe_forward
-    HAVE_SCATTERMOE = True
-except ImportError:
-    HAVE_SCATTERMOE = False
+def bench(func: Callable, quantiles: List[float], forward_backward: bool = False):
+    if forward_backward:
+        def inner():
+            output = func()
+            output.sum().backward()
+            return NoneType
+        func_to_call = inner
+    else:
+        func_to_call = func
+    return do_bench(lambda: func_to_call(), quantiles=quantiles, warmup=200, rep=400)
 
 def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     r""" This computes the flops of a GLU forward pass. Flops are counted separately,
@@ -41,23 +45,28 @@ def glu_tflops(num_tokens, num_experts, input_dim, hidden_dim, act_experts, ms):
     return flop_per_sec
 
 def moe_benchmark(plot_name, model_name, num_experts, act_experts, hidden_dim, input_dim, activation):
-    line_vals = ["torch", "grouped_gemm", "fused", "nested_tensor"]
-    line_names = ["Torch", "Grouped GLU", "Fused GLU", "Nested Tensor"]
+    line_vals = ["fused"]
+    line_names = ["Fused MoE"]
+    if HAVE_HUGGINGFACE:
+        line_vals.append("huggingface")
+        line_names.append("Huggingface")
     if HAVE_SCATTERMOE:
         line_vals.append("scattermoe")
         line_names.append("ScatterMoE")
+    if HAVE_TRANSFORMER_ENGINE:
+        line_vals.append("transformer-engine")
+        line_names.append("Transformer Engine")
     return Benchmark(
         x_names=["seq_len"],
-        x_vals=[64, 128, 256, 512, 1024],
+        x_vals=list(range(64, 4096, 512)),
         line_arg="provider",
         line_vals=line_vals,
         line_names=line_names,
         styles=[
             ("green", "-"), 
-            ("blue", "-"), 
-            ("red", "-"), 
-            ("orange", "--"),
-            ("black", "--")
+            ("blue", "-"),
+            ("black", "--"),
+            ("purple", "--")
         ],
         ylabel="ms",
         plot_name=plot_name,
@@ -79,7 +88,7 @@ configs.append(
             act_experts=8,
             input_dim=2048,
             hidden_dim=768,
-            activation="silu"
+            activation="swiglu"
         ))
 configs.append(
         moe_benchmark(
@@ -89,7 +98,7 @@ configs.append(
             act_experts=8,
             input_dim=2048,
             hidden_dim=1024,
-            activation="silu"
+            activation="swiglu"
         ))
 configs.append(
         moe_benchmark(
@@ -99,7 +108,7 @@ configs.append(
             act_experts=6,
             input_dim=2560,
             hidden_dim=1536,
-            activation="silu"
+            activation="swiglu"
         ))
 
 @perf_report(configs)
@@ -114,6 +123,7 @@ def benchmark_moe_forward(
     provider
 ):
     torch.manual_seed(0)
+    torch._dynamo.reset()
     
     if model_name == "ernie4":
         router = ernie_router
@@ -136,7 +146,7 @@ def benchmark_moe_forward(
             dtype=torch.bfloat16,
         )
     
-    glu_params = random_glu(
+    glu_params = random_interleaved_glu(
         num_experts=num_experts,
         hidden_dim=input_dim,
         intermediate_dim=hidden_dim,
@@ -152,26 +162,46 @@ def benchmark_moe_forward(
     )
     input = torch.randn((seq_len, input_dim), device=torch.device("cuda"), dtype=torch.bfloat16)
 
+    input.requires_grad = True
+    moe_params.expert_params.weight1.requires_grad = True
+    moe_params.expert_params.weight2.requires_grad = True
+
     quantiles = [0.5, 0.2, 0.8]
     autotune_mode = AutotuneMode.FAST
     if provider == "torch":
-        ms, min_ms, max_ms = do_bench(lambda: moe_glu_torch(input, moe_params, autotune_mode), quantiles=quantiles)
-    elif provider == "grouped_gemm":
-        ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm(input, moe_params, autotune_mode), quantiles=quantiles)
-    elif provider == "fused":
-        ms, min_ms, max_ms = do_bench(lambda: moe_glu_grouped_gemm_fused(input, moe_params, autotune_mode), quantiles=quantiles)
-    # Ernie4 forces the router to always use float32, scattermoe impl doesn't do that.
-    # So we pass in the router. 
+        ms, min_ms, max_ms = bench(
+            lambda: topk_moe_torch(input, moe_params, autotune_mode), 
+            quantiles=quantiles, 
+            forward_backward=False)
+    if provider == "fused":
+        ms, min_ms, max_ms = bench(
+            lambda: topk_moe(input, moe_params, autotune_mode), 
+            quantiles=quantiles,
+            forward_backward=False)
+    elif provider == "huggingface":
+        moe = make_huggingface_moe(input_dim, hidden_dim, num_experts, act_experts, activation, torch.bfloat16)
+        moe = moe.to(torch.bfloat16).to("cuda")
+        set_huggingface_moe_weights(moe, router_params.router_weight, glu_params.weight1, glu_params.weight2)
+        ms, min_ms, max_ms = bench(
+            lambda: moe(input.view(1, *input.size())),
+            quantiles=quantiles,
+            forward_backward=False)
     elif provider == "scattermoe":
-        glu = ScatterMoEGLU(
-            input_size=input_dim, 
-            hidden_size=hidden_dim,
-            num_experts=moe_params.num_experts,
-            top_k=moe_params.topk).to("cuda").to(torch.bfloat16)
-        ms, min_ms, max_ms = do_bench(
-            lambda: scattermoe_forward(input, router, router_params, glu, moe_params.topk),
-            quantiles=quantiles)
-
+        mlp = make_scattermoe_mlp(input_dim, hidden_dim, num_experts, act_experts, activation)
+        mlp = mlp.to(torch.bfloat16).to("cuda")
+        ms, min_ms, max_ms = bench(
+            lambda: scattermoe_forward(input, router, router_params, mlp, act_experts),
+            quantiles=quantiles,
+            forward_backward=False)
+    elif provider == "transformer-engine":
+        print(input.size(), input_dim, hidden_dim)
+        moe = TransformerEngineMoE(input_dim, hidden_dim, num_experts, act_experts, activation, torch.bfloat16)
+        moe = moe.to("cuda")
+        router_func = lambda x: router(x, router_params)
+        ms, min_ms, max_ms = bench(
+            lambda: moe(input, router_func),
+            quantiles=quantiles,
+            forward_backward=False)
     return ms, min_ms, max_ms
 
 benchmark_moe_forward.run(print_data=True, save_path="./")

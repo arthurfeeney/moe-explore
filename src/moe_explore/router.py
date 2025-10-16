@@ -19,9 +19,11 @@ def topk_router(
     input: torch.Tensor,
     router_params: TopkRouterParams
 ):
-    logits = input @ router_params.router_weight
+    router_logits = input @ router_params.router_weight
     if router_params.softmax_before_topk:
-        logits = softmax(logits)
+        logits = softmax(router_logits)
+    else:
+        logits = router_logits
 
     topk_scores, topk_indices = torch.topk(logits, k=router_params.topk, dim=-1, sorted=False)
 
@@ -32,7 +34,7 @@ def topk_router(
         topk_scores /= topk_scores.sum(dim=-1, keepdim=True)
 
     topk_scores = topk_scores.to(input.dtype)
-    return topk_scores, topk_indices
+    return topk_scores, topk_indices, router_logits
 
 @torch.compile
 def ernie_router(

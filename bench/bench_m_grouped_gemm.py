@@ -7,6 +7,12 @@ from moe_explore.triton_kernels.autotune_config import AutotuneMode
 from moe_explore.testing import random_groups, random_routing, random_skewed_routing, perfect_routing
 from triton.testing import perf_report, do_bench, Benchmark, do_bench_cudagraph
 
+try:
+    from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
+    HAVE_TRANSFORMER_ENGINE = True
+except ImportError:
+    HAVE_TRANSFORMER_ENGINE = False
+
 def m_grouped_gemm_benchmark_extensive(
     plot_name, 
     routing_func,
@@ -17,10 +23,14 @@ def m_grouped_gemm_benchmark_extensive(
     dtype
 ):
     line_vals = ["gemm-reference", "grouped-only", "grouped-gather", "grouped-scatter"]
-    line_names = ["GEMM-reference", "Grouped-only", "Grouped+Gather", "Grouped+Scatter"]
+    line_names = ["torch.bmm", "Grouped-only", "Grouped+Gather", "Grouped+Scatter"]
+    if HAVE_TRANSFORMER_ENGINE:
+        line_vals.append("transformer-engine")
+        line_names.append("TE Grouped Linear")
+    
     return Benchmark(
         x_names=["num_tokens"],
-        x_vals=list(range(256, 8192 + 1, 256)),
+        x_vals=list(range(256, 16000 + 1, 128)),
         line_arg="provider",
         line_vals=line_vals,
         line_names=line_names,
@@ -29,6 +39,7 @@ def m_grouped_gemm_benchmark_extensive(
             ("blue", "-"), 
             ("red", "-"),
             ("purple", "-"),
+            ("orange", "-")
         ],
         ylabel="ms",
         plot_name=plot_name,
@@ -68,15 +79,7 @@ m_grouped_gemm_benchmark_extensive(
     topk=8,
     dtype=torch.bfloat16
 ),
-m_grouped_gemm_benchmark_extensive(
-    "Qwen3-30B-A3B-style GEMM2, perfect routing",
-    routing_func=perfect_routing,
-    num_groups=128,
-    N=2048,
-    K=768,
-    topk=8,
-    dtype=torch.bfloat16
-),
+
 m_grouped_gemm_benchmark_extensive(
     "OLMoE-1B-7B-style GEMM1, perfect routing",
     routing_func=perfect_routing,
@@ -104,6 +107,15 @@ configs = [
         num_groups=64,
         N=2048,
         K=1024,
+        topk=8,
+        dtype=torch.bfloat16
+    ),
+    m_grouped_gemm_benchmark_extensive(
+        "Qwen3-30B-A3B-style GEMM2, perfect routing",
+        routing_func=perfect_routing,
+        num_groups=128,
+        N=2048,
+        K=768,
         topk=8,
         dtype=torch.bfloat16
     ),
@@ -155,8 +167,8 @@ configs.append(
 
 def bench(f):
     quantiles = [0.5, 0.2, 0.8]
-    #return do_bench(lambda: f(), quantiles=quantiles, warmup=200, rep=400)
-    return do_bench_cudagraph(lambda: f(), quantiles=quantiles, rep=100)
+    return do_bench(lambda: f(), quantiles=quantiles)#, warmup=200, rep=400)
+    #return do_bench_cudagraph(lambda: f(), quantiles=quantiles, rep=100)
 
 dist = torch.randn
 #dist = torch.zeros
@@ -166,8 +178,6 @@ def benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype, p):
     input = dist((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
     weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype)
     params = MGroupedGEMMParams(
-        weight,
-        p.group_indices,
         permute_indices=None,
         gather=False,
         scatter=False,
@@ -175,14 +185,12 @@ def benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype, p):
         topk=topk,
         scales=None
     )
-    return bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE))
+    return bench(lambda: m_grouped_gemm(input, weight, p.group_indices, params, AutotuneMode.NONE))
 
 def benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p):
     input = dist((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
-    weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) / math.sqrt(N)
+    weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) * 0.023 # / math.sqrt(N)
     params = MGroupedGEMMParams(
-        weight,
-        p.group_indices,
         permute_indices=p.indices,
         gather=True,
         scatter=False,
@@ -190,15 +198,14 @@ def benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p
         topk=topk,
         scales=None
     )
-    return bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE))
+    #f = torch.compile(m_grouped_gemm)
+    return bench(lambda: m_grouped_gemm(input, weight, p.group_indices, params, AutotuneMode.NONE))
 
 def benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, p, topk_scores):
     num_tokens_times_top = num_tokens * topk
     input = dist((num_tokens_times_top, K), device=torch.device("cuda"), dtype=dtype)
     weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) / math.sqrt(N)
     params = MGroupedGEMMParams(
-        weight,
-        p.group_indices,
         permute_indices=p.indices,
         gather=False,
         scatter=True,
@@ -206,21 +213,28 @@ def benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, 
         topk=topk,
         scales=topk_scores
     )
-    return bench(lambda: m_grouped_gemm(input, params, AutotuneMode.NONE))
+    f = torch.compile(m_grouped_gemm)
+    return bench(lambda: f(input, weight, p.group_indices, params, AutotuneMode.NONE))
 
 def benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype):
     r"""
     This is just a normal GEMM with the same number of FLOPs to other benchmarks
     benchmarks. This is just used a reference for performance.
     """
-    num_tokens = num_tokens * topk
+    num_tokens_times_topk = num_tokens * topk
     assert num_tokens % num_groups == 0
-    input = dist((num_groups, num_tokens // num_groups, K), device=torch.device("cuda"), dtype=dtype)
-    weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) / math.sqrt(N)
-    quantiles = [0.5, 0.2, 0.8]
-    f = torch.bmm
+    input = dist((num_groups, num_tokens_times_topk // num_groups, K), device=torch.device("cuda"), dtype=dtype)
+    weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) * 0.023
+    f = torch.compile(torch.bmm)
     f(input, weight)
     return bench(lambda: f(input, weight))
+
+def benchmark_te_grouped_linear(num_tokens, num_groups, N, K, topk, dtype, p):
+    num_tokens = num_tokens * topk
+    input = dist((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
+    m_splits = (p.group_indices[1:] - p.group_indices[:-1]).tolist()
+    grouped_linear = GroupedLinear(num_groups, K, N, bias=False, params_dtype=dtype)
+    return bench(lambda: grouped_linear(input, m_splits=m_splits, is_first_microbatch=None))
 
 def grouped_flops(num_tokens, num_groups, N, K, topk):
     num_tokens = num_tokens * topk
@@ -243,7 +257,9 @@ def benchmark_m_grouped_gemm_forward(
 
     if provider == "gemm-reference":
         ms, _, _ = benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype)
-    if provider in ("grouped-only", "grouped-gather", "grouped-scatter"):
+        
+    # We need to ensure that each of these uses the same routing setup. 
+    if provider in ("grouped-only", "grouped-gather", "grouped-scatter", "transformer-engine"):
         topk_scores, topk_indices = routing_func(num_tokens, num_groups, topk, device="cuda", dtype=dtype)
         p = get_token_indices(
             topk_indices.view(-1),
@@ -251,6 +267,8 @@ def benchmark_m_grouped_gemm_forward(
             num_groups,
             zero_prefix=True
         )
+        if provider == "transformer-engine":
+            ms, _, _ = benchmark_te_grouped_linear(num_tokens, num_groups, N, K, topk, dtype, p)
         if provider == "grouped-only":
             ms, _, _ = benchmark_m_grouped_gemm_only(num_tokens, num_groups, N, K, topk, dtype, p)
         if provider == "grouped-gather":
