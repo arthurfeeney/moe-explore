@@ -19,7 +19,6 @@ def test_k_grouped_gemm(
     activation,
     dtype: torch.dtype
 ):
-    assert torch.cuda.is_available()
     tokens = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
     grad_output = torch.randn((num_tokens, N), dtype=dtype, device="cuda") / math.sqrt(N) 
     group_indices = random_groups(num_tokens, num_experts, device="cuda")

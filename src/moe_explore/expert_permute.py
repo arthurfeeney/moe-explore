@@ -24,7 +24,7 @@ def get_token_indices(
     zero_prefix=False
 ):
     flat_expert_indices = expert_indices.view(-1)
-    indices = flat_expert_indices.argsort()
+    indices = flat_expert_indices.argsort(stable=True)
     counts = torch.zeros(num_experts, dtype=torch.int32, device=expert_indices.device)
     torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts, out=counts)
 

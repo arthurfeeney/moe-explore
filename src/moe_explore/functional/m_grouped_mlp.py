@@ -31,7 +31,7 @@ def m_grouped_mlp_forward(
         topk=topk,
         activation=None#activation
     )
-
+    
     if activation is not None:
         intermediate = activation_func(pre_activation, activation)
     else:

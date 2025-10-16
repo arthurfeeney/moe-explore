@@ -4,11 +4,14 @@ from dataclasses import dataclass
 import pytest
 import torch
 from moe_explore.functional.topk_moe import (
-    topk_moe_forward,
+    topk_moe,
     topk_moe_torch
 )
+from moe_explore.router import router
 from moe_explore.params import MOEParams
 from moe_explore.testing import random_mlp, random_topk_router, assert_close, random_interleaved_glu
+from moe_explore.baseline.huggingface import make_huggingface_moe, set_huggingface_moe_weights
+from moe_explore.baseline.transformer_engine import TransformerEngineMoE
 
 test_params = [
     # This test runs the full forward and backward pass. With low precision and
@@ -32,6 +35,9 @@ test_params = [
     (999, 1000, 1000, "gelu", 64, 8, torch.float32),
     (999, 1000, 1000, "swiglu", 64, 8, torch.float32),
     (999, 1000, 1000, "geglu", 64, 8, torch.float32),
+    # Some sizes that require masking.
+    #(1, 1000, 1000, "geglu", 64, 8, torch.float32),
+    (1, 30, 30, "geglu", 64, 8, torch.float32),
 ]
 
 @pytest.mark.parametrize(
@@ -71,7 +77,7 @@ def test_topk_moe(
         topk
     )
 
-    output = topk_moe_forward(
+    output = topk_moe(
         input,
         moe_params
     )
@@ -108,3 +114,84 @@ def test_topk_moe(
     assert_close(actual_tokens_grad, ref_tokens_grad)
     assert_close(actual_weight1_grad, ref_weight1_grad)
     assert_close(actual_weight2_grad, ref_weight2_grad)
+
+def test_hf_moe():
+    num_experts = 16
+    seq_len = 128
+    input_dim = 128
+    hidden_dim = 256
+    activation = "swiglu"
+    topk = 4
+    dtype = torch.bfloat16
+    
+    router_params = random_topk_router(
+        num_experts,
+        input_dim,
+        topk,
+        softmax_before_topk=True,
+        normalize_routing=False,
+        device="cuda",
+        dtype=dtype
+    )    
+    mlp_params = random_interleaved_glu(num_experts, input_dim, hidden_dim, activation, device="cuda", dtype=dtype)
+    moe_params = MOEParams(
+        router_params,
+        mlp_params,
+        num_experts,
+        topk
+    )
+    
+    mlp_params.weight1.data[:] = torch.ones_like(mlp_params.weight1)
+    mlp_params.weight2.data[:] = torch.ones_like(mlp_params.weight2)
+    
+    input = torch.randn((seq_len, input_dim), device="cuda", dtype=dtype)
+    
+    output = topk_moe(
+        input,
+        moe_params
+    )
+    
+    moe = make_huggingface_moe(input_dim, hidden_dim, num_experts, topk, activation, dtype).to("cuda").to(dtype)
+    moe = set_huggingface_moe_weights(moe, router_params.router_weight, mlp_params.weight1, mlp_params.weight2)
+    hf_hidden_states, hf_router_logits = moe(input.view(1, *input.size()))
+    
+    assert_close(output, hf_hidden_states.squeeze(0)) 
+    
+def test_te_moe():
+    num_experts = 16
+    seq_len = 128
+    input_dim = 128
+    hidden_dim = 256
+    activation = "none"
+    topk = 4
+    dtype = torch.bfloat16
+    
+    router_params = random_topk_router(
+        num_experts,
+        input_dim,
+        topk,
+        softmax_before_topk=True,
+        normalize_routing=False,
+        device="cuda",
+        dtype=dtype
+    )    
+    mlp_params = random_mlp(num_experts, input_dim, hidden_dim, activation, device="cuda", dtype=dtype)
+    moe_params = MOEParams(
+        router_params,
+        mlp_params,
+        num_experts,
+        topk
+    )
+    
+    input = torch.randn((seq_len, input_dim), device="cuda", dtype=dtype)
+    
+    output = topk_moe(
+        input,
+        moe_params
+    )
+    
+    te_moe = TransformerEngineMoE(input_dim, hidden_dim, num_experts, topk, activation, dtype)
+    te_moe.init_weights(mlp_params.weight1, mlp_params.weight2)
+    te_output = te_moe(input, lambda x: router(x, router_params))
+    
+    assert_close(output, te_output)

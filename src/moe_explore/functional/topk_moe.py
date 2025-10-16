@@ -1,23 +1,29 @@
 import torch
 import triton.profiler as proton
-from moe_explore.params import MOEParams, MLPParams
+from moe_explore.params import MOEParams, MLPParams, PerfConfig
 from moe_explore.functional.activation import activation
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.router import router
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.functional.m_grouped_mlp import m_grouped_mlp
 from moe_explore.expert_permute import expert_input_permute, expert_output_permute
+from typing import Optional
 
-@torch.compile(fullgraph=True)
-def topk_moe_forward(
+#@torch.compile(
+#    options={
+#        "shape_padding": True
+#    },
+#    fullgraph=True
+#)
+def topk_moe(
     input: torch.Tensor,
     params: MOEParams,
-    autotune_mode = None
+    autotune_mode = None,
+    perf_config: Optional[PerfConfig] = None
 ):
     ep: MLPParams = params.expert_params
-    topk_scores, topk_indices = router(input, params.router_params)
+    topk_scores, topk_indices, router_logits = router(input, params.router_params)
     perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
-
     down = m_grouped_mlp(
         input,
         ep.weight1,
@@ -28,38 +34,7 @@ def topk_moe_forward(
         params.topk,
         ep.activation
     )
-
     down = scale_and_reduce(down, topk_scores, input.size(0), params.topk, down.size(-1))
-
-    return down
-
-def topk_moe_unfused_forward(
-    input: torch.Tensor,
-    params: MOEParams,
-    autotune_mode = None
-):
-    ep: MLPParams = params.expert_params
-    with proton.scope("router"):
-        topk_scores, topk_indices = router(input, params.router_params)
-
-    with proton.scope("input_permute"):
-        grouped_tokens = expert_input_permute(input, topk_indices, params.num_experts, params.topk)
-
-    with proton.scope("mlp"):
-        grouped_tokens.tokens = m_grouped_mlp(
-            grouped_tokens.tokens,
-            ep.weight1,
-            ep.weight2,
-            grouped_tokens.group_indices,
-            None,
-            input.size(0),
-            params.topk,
-            ep.activation
-        )
-
-    with proton.scope("output_permute"): 
-        down = expert_output_permute(grouped_tokens, topk_scores, params.topk, grouped_tokens.tokens.shape)
-
     return down
 
 @torch.compile
@@ -72,6 +47,7 @@ def topk_moe_torch(
     with proton.scope("router"):
         topk_scores, topk_indices = router(input, params.router_params)
         flat_expert_weights = topk_scores.view(-1, 1)
+    
     with proton.scope("get_token_indices"):
         perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts)
 
