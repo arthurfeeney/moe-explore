@@ -1,10 +1,11 @@
 import torch
 from torch.profiler import profile, schedule, record_function, ProfilerActivity
-from moe_explore.functional.topk_moe import topk_moe_forward
+from moe_explore.functional.topk_moe import topk_moe
 from moe_explore.params import MOEParams
 from moe_explore.testing import random_topk_router, random_mlp
+import copy
 
-num_tokens = 32000
+num_tokens = 1000
 hidden_dim = 2048
 intermediate_dim = 768
 num_experts = 128
@@ -43,17 +44,24 @@ with profile(
     )
 ) as prof:
     
-    for i in range(6):
+    for i in range(7):
+
+        torch.compiler.cudagraph_mark_step_begin()
+                
         with record_function("topk_moe_forward"):
-            output = topk_moe_forward(
+        
+            output = topk_moe(
                 input,
                 moe_params
             )
+            
+            output = output.clone()
             
         with record_function("topk_moe_backward"):
             output.sum().backward()
             
         torch.cuda.synchronize()
+        
         
         prof.step()
         
