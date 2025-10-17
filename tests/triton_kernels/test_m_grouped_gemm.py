@@ -9,7 +9,10 @@ from moe_explore.functional.activation import activation
 from moe_explore.expert_permute import get_token_indices
 from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_routing, random_groups, assert_close
 import pytest
-from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
+try:
+    from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
+except ImportError:
+    GroupedLinear = None
 
 @pytest.mark.parametrize("num_tokens,num_experts,K,N,activation,dtype", [
     (10, 4, 128, 128, None, torch.bfloat16),
@@ -284,6 +287,9 @@ def test_m_grouped_gemm_layouts(
     assert_close(out, ref)
     
 def test_te_grouped_linear():
+    if GroupedLinear is None:
+        return
+    
     num_tokens = 1000
     num_experts = 16
     K = 128

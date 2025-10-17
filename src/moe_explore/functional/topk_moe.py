@@ -18,6 +18,7 @@ from typing import Optional
 def topk_moe(
     input: torch.Tensor,
     params: MOEParams,
+    return_router_logits: bool = False,
     autotune_mode = None,
     perf_config: Optional[PerfConfig] = None
 ):
@@ -35,7 +36,10 @@ def topk_moe(
         ep.activation
     )
     down = scale_and_reduce(down, topk_scores, input.size(0), params.topk, down.size(-1))
-    return down
+    if return_router_logits:
+        return down, router_logits
+    else:
+        return down
 
 @torch.compile
 def topk_moe_torch(
