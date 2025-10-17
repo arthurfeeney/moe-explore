@@ -9,13 +9,15 @@ class TopkMoE(torch.nn.Module):
         hidden_dim: int,
         intermediate_dim: int,
         topk: int,
-        activation: str
+        activation: str,
+        return_topk_logits: bool = False
     ):
         super().__init__()
         
         self.num_experts = num_experts
         self.topk = topk
         self.activation = activation
+        self.return_topk_logits = return_topk_logits
 
         self.router_weight = torch.nn.Parameter(torch.empty(hidden_dim, num_experts))
         weight1_dim = intermediate_dim * 2 if "glu" in activation else intermediate_dim
@@ -46,5 +48,10 @@ class TopkMoE(torch.nn.Module):
             num_experts=self.num_experts,
             topk=self.topk
         )
-       
-        return topk_moe(input.view(-1, input.size(-1)), params)
+        
+        flat_input = input.view(-1, input.size(-1))
+        moe_output = topk_moe(flat_input, params, return_router_logits=self.return_topk_logits)
+        if self.return_topk_logits:
+            output, topk_logits = moe_output
+            return output.view(input.size()), topk_logits
+        return moe_output

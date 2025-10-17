@@ -9,6 +9,7 @@ try:
     HAVE_TRANSFORMER_ENGINE = True
 except ImportError:
     HAVE_TRANSFORMER_ENGINE = False
+    print("failed to import transformer-engine")
 
 from moe_explore.functional.activation import activation as activation_func
 
@@ -55,7 +56,7 @@ class TransformerEngineMoE(torch.nn.Module):
         router,
     ):
         assert tokens.dim() == 2
-        topk_scores, topk_indices = router(tokens)
+        topk_scores, topk_indices, _ = router(tokens)
         permuted_tokens, row_id_map = moe_permute(
             tokens,
             topk_indices.to(torch.int32),
