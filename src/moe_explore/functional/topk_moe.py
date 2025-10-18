@@ -1,6 +1,6 @@
 import torch
 import triton.profiler as proton
-from moe_explore.params import MOEParams, MLPParams, PerfConfig
+from moe_explore.params import MOEParams, MLPParams
 from moe_explore.functional.activation import activation
 from moe_explore.functional.scale_and_reduce import scale_and_reduce
 from moe_explore.router import router
@@ -20,7 +20,6 @@ def topk_moe(
     params: MOEParams,
     return_router_logits: bool = False,
     autotune_mode = None,
-    perf_config: Optional[PerfConfig] = None
 ):
     ep: MLPParams = params.expert_params
     topk_scores, topk_indices, router_logits = router(input, params.router_params)
@@ -49,7 +48,7 @@ def topk_moe_torch(
 ):
     ep: MLPParams = params.expert_params
     with proton.scope("router"):
-        topk_scores, topk_indices = router(input, params.router_params)
+        topk_scores, topk_indices, _ = router(input, params.router_params)
         flat_expert_weights = topk_scores.view(-1, 1)
     
     with proton.scope("get_token_indices"):
