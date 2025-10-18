@@ -3,6 +3,7 @@ from functools import partial
 import torch
 import triton
 import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
 from .activation import TRITON_ACTIVATIONS
@@ -11,7 +12,7 @@ from .autotune_config import (
     fast_autotune_configs, 
     max_autotune_configs
 )
-from .epilogue_split import epilogue_split, store_split_epilogue
+from .epilogue_split import epilogue_split, store_split_epilogue, store_split_epilogue_tensor_descriptor
 
 @dataclass
 class KGroupedGEMMParams:
@@ -49,6 +50,7 @@ def k_grouped_gemm_inner_kernel(
     TOPK: tl.constexpr,
     GATHER_A: tl.constexpr,
     GATHER_B: tl.constexpr,
+    USE_OUT_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -58,7 +60,6 @@ def k_grouped_gemm_inner_kernel(
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
-    USE_TENSOR_DESCRIPTOR: tl.constexpr,
 ):
     num_m_tiles = tl.cdiv(M, BLOCK_M)
     num_n_tiles = tl.cdiv(N, BLOCK_N)    
@@ -105,18 +106,14 @@ def k_grouped_gemm_inner_kernel(
             a_row_offsets = (start_idx + k_offset) * a_stride_1
             a_col_offsets = tile_m_offsets * a_stride_2
             a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
-        #else:
-        #    a_ptrs = tl.zeros((BLOCK_K, BLOCK_M), dtype=a_ptr.dtype)
+
         if not GATHER_B:
             b_row_offsets = (start_idx + k_offset) * b_stride_1
             b_col_offsets = tile_n_offsets * b_stride_2            
             b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
-        #else:
-        #    b_ptrs = tl.zeros((BLOCK_K, BLOCK_N), dtype=b_ptr.dtype)
-                
+       
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_iter in tl.range(0, tl.cdiv(k, BLOCK_K)):
-            # TODO: don't like this! Should pre-allocate pointers/??
             if not GATHER_A:
                 tl.multiple_of(a_ptrs, [16, 16])
             if not GATHER_B:
@@ -129,8 +126,8 @@ def k_grouped_gemm_inner_kernel(
             b_mask = k_mask[:, None] & (tile_n_offsets < N)
         
             if GATHER_A or GATHER_B:
-                gather_indices = tl.load(permute_indices_ptr + k_step_offset,
-                                         cache_modifier=".ca")
+                gather_indices = tl.load(permute_indices_ptr + k_step_offset)
+                
             if GATHER_A:
                 a_row_offsets = (gather_indices // TOPK) * a_stride_1
                 a_col_offsets = tile_m_offsets * a_stride_2
@@ -156,20 +153,26 @@ def k_grouped_gemm_inner_kernel(
         # of the outer loop with the epilogue.
         accs = epilogue_split(acc, EPILOGUE_SPLIT, EPILOGUE, BLOCK_M, BLOCK_N)
 
-        tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
-        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
-        out_m_mask = tile_m_offsets < M
-        # The accumulators are all the same size, but the EPILOGUE may change the 
-        # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
-        out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
-        out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
+        if not USE_OUT_TENSOR_DESCRIPTOR:
+            tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
+            tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
+            out_m_mask = tile_m_offsets < M
+            # The accumulators are all the same size, but the EPILOGUE may change the 
+            # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
+            out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
+            out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
 
-        out_row_offsets = tile_m_offsets
-        out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
-        out_ptrs = out_ptr + out_offsets
+            out_row_offsets = tile_m_offsets
+            out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
+            out_ptrs = out_ptr + out_offsets
 
-        store_split_epilogue(out_ptrs, out_stride_3, out_m_mask, N - tile_n_idx, accs)
-
+            store_split_epilogue(out_ptrs, out_stride_3, out_m_mask, N - tile_n_idx, accs)
+        else:
+            for i in tl.static_range(len(accs)):
+                # need to explicitly cast `out` dtype to match the descriptor dtype
+                out = accs[i].expand_dims(0).to(out_ptr.dtype)
+                out_ptr.store([problem_id, tile_m_idx, tile_n_idx + i * out.shape[1]], out)
+            
         tile_id += NUM_PROGRAMS
     
     return tile_id, num_tiles
@@ -191,6 +194,7 @@ def k_grouped_gemm_persistent_kernel(
     TOPK: tl.constexpr,
     GATHER_A: tl.constexpr,
     GATHER_B: tl.constexpr,
+    USE_OUT_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -200,7 +204,6 @@ def k_grouped_gemm_persistent_kernel(
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
-    USE_TENSOR_DESCRIPTOR: tl.constexpr
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -244,6 +247,7 @@ def k_grouped_gemm_persistent_kernel(
             TOPK,
             GATHER_A,
             GATHER_B,
+            USE_OUT_TENSOR_DESCRIPTOR,
             NUM_PROGRAMS,
             BLOCK_M,
             BLOCK_N,
@@ -252,7 +256,6 @@ def k_grouped_gemm_persistent_kernel(
             EPILOGUE,
             EPILOGUE_SPLIT,
             DISALLOW_ACC_MULTI_BUFFER,
-            USE_TENSOR_DESCRIPTOR
         )
         
         start_idx = end_idx
@@ -276,8 +279,8 @@ def k_grouped_gemm_default_config(e, params, dtype):
     BLOCK_K = 32
     num_stages = 5
     if dtype == torch.float32:
-        BLOCK_N //= 2
-        num_stages -= 1
+        #BLOCK_N //= 2
+        num_stages = 3
     default_config = triton.Config({
             "BLOCK_M": BLOCK_M, 
             "BLOCK_N": BLOCK_N, 
@@ -286,7 +289,7 @@ def k_grouped_gemm_default_config(e, params, dtype):
             "CACHE_GROUP_M": 8,
             "EPILOGUE_SPLIT": 2,
             "DISALLOW_ACC_MULTI_BUFFER": False,
-            "USE_TENSOR_DESCRIPTOR": False,
+            "USE_OUT_TENSOR_DESCRIPTOR": True
         },
         num_warps=8, 
         num_stages=num_stages
@@ -317,6 +320,18 @@ def k_grouped_gemm(
     default_kwargs = default_config.all_kwargs()
     del default_kwargs["num_ctas"]
     
+    block_m, block_n = default_kwargs["BLOCK_M"], default_kwargs["BLOCK_N"]
+    use_out_tensor_descriptor = default_kwargs["USE_OUT_TENSOR_DESCRIPTOR"]
+    del default_kwargs["USE_OUT_TENSOR_DESCRIPTOR"]
+    # only use descriptors when strides, except the last, are 16-byte aligned
+    use_out_tensor_descriptor = use_out_tensor_descriptor and all([(s * out.element_size()) % 16 == 0 for s in out.stride()[:-1]])
+    # I'm not sure why it doesn't work with float32...
+    use_out_tensor_descriptor = out.dtype in (torch.float16, torch.bfloat16)
+    if use_out_tensor_descriptor:
+        # the descriptor needs to account for the potential epilogue splitting.
+        block_size = [1, block_m, block_n // default_kwargs["EPILOGUE_SPLIT"]]
+        out_desc = TensorDescriptor.from_tensor(out, block_size)
+
     func = k_grouped_gemm_persistent_kernel
     #if autotune_mode == AutotuneMode.FAST:
     #    func = _fast_autotune_k_grouped_gemm_persistent_kernel
@@ -324,7 +339,7 @@ def k_grouped_gemm(
     #elif autotune_mode == AutotuneMode.MAX:
     #    func = _max_autotune_k_grouped_gemm_persistent_kernel
     #    default_kwargs = {}
-        
+
     epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
         
     grid = lambda META: (META["NUM_PROGRAMS"],)
@@ -334,7 +349,7 @@ def k_grouped_gemm(
         a.stride(0), a.stride(1),
         b,
         b.stride(0), b.stride(1),
-        out,
+        out_desc if use_out_tensor_descriptor else out,
         out.stride(0), out.stride(1), out.stride(2),
         group_indices, 
         params.permute_indices, 
@@ -345,6 +360,7 @@ def k_grouped_gemm(
         TOPK=params.topk,
         GATHER_A=params.gather_a,
         GATHER_B=params.gather_b,
+        USE_OUT_TENSOR_DESCRIPTOR=use_out_tensor_descriptor,
         EPILOGUE=epilogue,
         **default_kwargs
     )
