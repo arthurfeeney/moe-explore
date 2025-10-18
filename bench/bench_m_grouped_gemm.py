@@ -12,7 +12,13 @@ try:
     HAVE_TRANSFORMER_ENGINE = True
 except ImportError:
     HAVE_TRANSFORMER_ENGINE = False
-
+    
+try:
+    from torch import _grouped_mm
+    HAVE_TORCH_GROUPED_MM = True
+except ImportError:
+    HAVE_TORCH_GROUPED_MM = False
+    
 def m_grouped_gemm_benchmark_extensive(
     plot_name, 
     routing_func,
@@ -27,10 +33,13 @@ def m_grouped_gemm_benchmark_extensive(
     if HAVE_TRANSFORMER_ENGINE:
         line_vals.append("transformer-engine")
         line_names.append("TE Grouped Linear")
+    if HAVE_TORCH_GROUPED_MM:
+        line_vals.append("torch-grouped-mm")
+        line_names.append("Torch Grouped MM")
     
     return Benchmark(
         x_names=["num_tokens"],
-        x_vals=list(range(256, 16000 + 1, 128)),
+        x_vals=list(range(256, 4096 + 1, 512)),
         line_arg="provider",
         line_vals=line_vals,
         line_names=line_names,
@@ -225,7 +234,7 @@ def benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype):
     assert num_tokens % num_groups == 0
     input = dist((num_groups, num_tokens_times_topk // num_groups, K), device=torch.device("cuda"), dtype=dtype)
     weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) * 0.023
-    f = torch.compile(torch.bmm)
+    f = torch.bmm
     f(input, weight)
     return bench(lambda: f(input, weight))
 
@@ -235,6 +244,17 @@ def benchmark_te_grouped_linear(num_tokens, num_groups, N, K, topk, dtype, p):
     m_splits = (p.group_indices[1:] - p.group_indices[:-1]).tolist()
     grouped_linear = GroupedLinear(num_groups, K, N, bias=False, params_dtype=dtype)
     return bench(lambda: grouped_linear(input, m_splits=m_splits, is_first_microbatch=None))
+
+def benchmark_torch_grouped_mm(num_tokens, num_groups, N, K, topk, dtype, p):
+    num_tokens = num_tokens * topk
+    input = dist((num_tokens, K), device=torch.device("cuda"), dtype=dtype)
+    weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) * 0.023
+    offsets = p.group_indices[1:]
+    try:
+        return bench(lambda: _grouped_mm(input, weight, offs=offsets))
+    except:
+        print("torch grouped mm needs at least sm90")
+        return 0, 0, 0
 
 def grouped_flops(num_tokens, num_groups, N, K, topk):
     num_tokens = num_tokens * topk
@@ -259,7 +279,7 @@ def benchmark_m_grouped_gemm_forward(
         ms, _, _ = benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype)
         
     # We need to ensure that each of these uses the same routing setup. 
-    if provider in ("grouped-only", "grouped-gather", "grouped-scatter", "transformer-engine"):
+    if provider in ("grouped-only", "grouped-gather", "grouped-scatter", "transformer-engine", "torch-grouped-mm"):
         topk_scores, topk_indices = routing_func(num_tokens, num_groups, topk, device="cuda", dtype=dtype)
         p = get_token_indices(
             topk_indices.view(-1),
@@ -275,7 +295,9 @@ def benchmark_m_grouped_gemm_forward(
             ms, _, _ = benchmark_m_grouped_gemm_gather(num_tokens, num_groups, N, K, topk, dtype, p)
         if provider == "grouped-scatter":
             ms, _, _ = benchmark_m_grouped_gemm_scatter(num_tokens, num_groups, N, K, topk, dtype, p, topk_scores)
-
+        if provider == "torch-grouped-mm":
+            ms, _, _ = benchmark_torch_grouped_mm(num_tokens, num_groups, N, K, topk, dtype, p)
+            
     flops = grouped_flops(num_tokens, num_groups, N, K, topk)
     tflops = flops / (ms / 1000) * 1e-12
     return tflops
