@@ -21,14 +21,10 @@ def epilogue_split(
         acc = tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2))
         acc = tl.permute(acc, (0, 2, 1))
         acc0, acc1 = tl.split(acc)
-        accs = (acc0, acc1)
+        accs = (EPILOGUE(acc0), EPILOGUE(acc1)) if EPILOGUE is not None else (acc0, acc1)
     else:
-        accs = (acc,)
+        accs = (EPILOGUE(acc),) if EPILOGUE is not None else (acc,)
     
-    for i in tl.static_range(len(accs)):
-        if EPILOGUE is not None:
-            accs[i] = EPILOGUE(accs[i])
-
     return accs
 
 @triton.jit
