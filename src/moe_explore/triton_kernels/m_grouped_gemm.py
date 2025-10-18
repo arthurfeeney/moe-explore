@@ -3,6 +3,7 @@ from functools import partial
 import torch
 import triton
 import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
 from .activation import TRITON_ACTIVATIONS
@@ -58,6 +59,7 @@ def m_grouped_gemm_inner_kernel(
     SCATTER_ROWS: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
+    USE_B_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -67,7 +69,6 @@ def m_grouped_gemm_inner_kernel(
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
-    USE_TENSOR_DESCRIPTOR: tl.constexpr,
 ):          
     num_m_tiles = tl.cdiv(m, BLOCK_M)
     num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)    
@@ -122,54 +123,45 @@ def m_grouped_gemm_inner_kernel(
             a_col_offsets = k_offset * a_stride_2
         a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
 
-        b_problem_offset = problem_id * b_stride_1
-        if IS_B_TRANSPOSED:
-            b_row_offsets = tile_n_offsets * b_stride_2
-            b_col_offsets = k_offset * b_stride_3
-        else:
-            b_row_offsets = k_offset * b_stride_2
-            b_col_offsets = tile_n_offsets * b_stride_3            
-        b_ptrs = b_ptr + b_problem_offset + b_row_offsets[:, None] + b_col_offsets
+        if not USE_B_TENSOR_DESCRIPTOR:
+            b_problem_offset = problem_id * b_stride_1
+            if IS_B_TRANSPOSED:
+                b_row_offsets = tile_n_offsets * b_stride_2
+                b_col_offsets = k_offset * b_stride_3
+            else:
+                b_row_offsets = k_offset * b_stride_2
+                b_col_offsets = tile_n_offsets * b_stride_3            
+            b_ptrs = b_ptr + b_problem_offset + b_row_offsets[:, None] + b_col_offsets
         
-        MASK_N: tl.constexpr = N % BLOCK_N != 0
-        MASK_K: tl.constexpr = K % BLOCK_K != 0
-        
-        if MASK_N:
-            n_mask = tile_n_offsets < N
-
+        n_mask = tile_n_offsets < N
         token_mask = start_idx + tile_m_offsets < end_idx
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
             tl.multiple_of(a_ptrs, [16, 16])
-            tl.multiple_of(b_ptrs, [16, 16])
+            if not USE_B_TENSOR_DESCRIPTOR:
+               tl.multiple_of(b_ptrs, [16, 16])
             
             k_remaining = K - k * BLOCK_K
-            if MASK_N and MASK_K:
-                a_mask = token_mask[:, None] & (k_offset < k_remaining)
+            a_mask = token_mask[:, None] & (k_offset < k_remaining)
+            if not USE_B_TENSOR_DESCRIPTOR:
                 b_mask = n_mask[None, :] & (k_offset[:, None] < k_remaining)
-            elif MASK_K:
-                a_mask = token_mask[:, None] & (k_offset < k_remaining)
-                b_mask = k_offset[:, None] < k_remaining
-            elif MASK_N:
-                a_mask = token_mask[:, None]
-                b_mask = n_mask[None, :]
-            else:
-                a_mask = token_mask[:, None]
-             
+            
             if IS_A_TRANSPOSED:
                 a_mask = a_mask.T
-            if IS_B_TRANSPOSED and (MASK_N or MASK_K):
+            if IS_B_TRANSPOSED and not USE_B_TENSOR_DESCRIPTOR:
                 b_mask = b_mask.T
 
-            # TODO: this branch may not be necessary if triton is able
-            # to optimize away the masking on its own.
-            if MASK_N or MASK_K:
-                a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
-                b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)            
+            if USE_B_TENSOR_DESCRIPTOR:
+                if not IS_B_TRANSPOSED:
+                    b_block = b_ptr.load([problem_id, k * BLOCK_K, tile_n_idx])
+                    b_block = tl.reshape(b_block, (BLOCK_K, BLOCK_N))
+                else:
+                    b_block = b_ptr.load([problem_id, tile_n_idx, k * BLOCK_K])
+                    b_block = tl.reshape(b_block, (BLOCK_N, BLOCK_K))    
             else:
-                a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
-                b_block = tl.load(b_ptrs)
+                b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
 
             if IS_A_TRANSPOSED:
                 a_block = a_block.T
@@ -181,11 +173,13 @@ def m_grouped_gemm_inner_kernel(
             if IS_A_TRANSPOSED:
                 a_ptrs += BLOCK_K * a_stride_1
             else:
-                a_ptrs += BLOCK_K * a_stride_2        
-            if IS_B_TRANSPOSED:
-                b_ptrs += BLOCK_K * b_stride_3
-            else:
-                b_ptrs += BLOCK_K * b_stride_2
+                a_ptrs += BLOCK_K * a_stride_2    
+                
+            if not USE_B_TENSOR_DESCRIPTOR:    
+                if IS_B_TRANSPOSED:
+                    b_ptrs += BLOCK_K * b_stride_3
+                else:
+                    b_ptrs += BLOCK_K * b_stride_2
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
@@ -234,6 +228,7 @@ def m_grouped_gemm_persistent_kernel(
     SCATTER_ROWS: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
+    USE_B_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -243,7 +238,6 @@ def m_grouped_gemm_persistent_kernel(
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
-    USE_TENSOR_DESCRIPTOR: tl.constexpr
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -266,8 +260,6 @@ def m_grouped_gemm_persistent_kernel(
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
         tl.assume(m <= NUM_TOKENS * TOPK)
-        MASK_N: tl.constexpr = N % BLOCK_N != 0
-        MASK_K: tl.constexpr = K % BLOCK_K != 0
                 
         num_m_tiles = tl.cdiv(m, BLOCK_M)
         num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)    
@@ -298,6 +290,7 @@ def m_grouped_gemm_persistent_kernel(
             SCATTER_ROWS,
             IS_A_TRANSPOSED,
             IS_B_TRANSPOSED,
+            USE_B_TENSOR_DESCRIPTOR,
             NUM_PROGRAMS,
             BLOCK_M,
             BLOCK_N,
@@ -305,8 +298,7 @@ def m_grouped_gemm_persistent_kernel(
             CACHE_GROUP_M,
             EPILOGUE,
             EPILOGUE_SPLIT,
-            DISALLOW_ACC_MULTI_BUFFER,
-            USE_TENSOR_DESCRIPTOR
+            DISALLOW_ACC_MULTI_BUFFER
         )
         
         start_idx = end_idx
@@ -327,8 +319,8 @@ _max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
 def m_grouped_gemm_default_config(e, params, dtype):
     BLOCK_M = 128
     BLOCK_N = 256
-    BLOCK_K = 32
-    num_stages = 5
+    BLOCK_K = 64
+    num_stages = 4
     if dtype == torch.float32:
         BLOCK_N //= 2
         num_stages -= 1
@@ -341,7 +333,7 @@ def m_grouped_gemm_default_config(e, params, dtype):
                 "CACHE_GROUP_M": 8,
                 "EPILOGUE_SPLIT": 2,
                 "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_TENSOR_DESCRIPTOR": False,
+                "USE_B_TENSOR_DESCRIPTOR": True
             },
             num_warps=8, 
             num_stages=num_stages
@@ -355,7 +347,7 @@ def m_grouped_gemm_default_config(e, params, dtype):
                 "CACHE_GROUP_M": 8,
                 "EPILOGUE_SPLIT": 2,
                 "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_TENSOR_DESCRIPTOR": False,
+                "USE_B_TENSOR_DESCRIPTOR": True
             },
             num_warps=8, 
             num_stages=num_stages
@@ -369,7 +361,7 @@ def m_grouped_gemm_default_config(e, params, dtype):
                 "CACHE_GROUP_M": 8,
                 "EPILOGUE_SPLIT": 2,
                 "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_TENSOR_DESCRIPTOR": False,
+                "USE_B_TENSOR_DESCRIPTOR": True
             },
             num_warps=8, 
             num_stages=num_stages
@@ -392,12 +384,15 @@ def m_grouped_gemm(
 
     num_tokens = params.num_tokens
     e, k, n = b.size()
-
+    
+    # if it's transposed, then rename n and k
+    if params.is_b_transposed:
+        k, n = n, k
+    
     if params.gather or params.scatter:
         out_rows = num_tokens * params.topk
     else:
         out_rows = num_tokens
-        
     out_cols = n
     if params.activation is not None and "glu" in params.activation:
         out_cols //= 2
@@ -408,6 +403,19 @@ def m_grouped_gemm(
     default_kwargs = default_config.all_kwargs()
     # torch.compile(fullgraph=True) does not supporting passing in num_ctas
     del default_kwargs["num_ctas"]
+    
+    block_k, block_n = default_kwargs["BLOCK_K"], default_kwargs["BLOCK_N"]
+    use_b_tensor_descriptor = default_kwargs["USE_B_TENSOR_DESCRIPTOR"]
+    # only use descriptors when strides are 16-byte aligned
+    use_b_tensor_descriptor = use_b_tensor_descriptor and all([(s * b.element_size()) % 16 == 0 for s in b.stride()])
+    if use_b_tensor_descriptor: 
+        if params.is_b_transposed:
+            block_size = [1, block_n, block_k]
+        else:
+            block_size = [1, block_k, block_n]
+        b_desc = TensorDescriptor.from_tensor(b, block_size)
+
+    del default_kwargs["USE_B_TENSOR_DESCRIPTOR"]
     
     func = m_grouped_gemm_persistent_kernel
     #if autotune_mode == AutotuneMode.FAST:
@@ -425,7 +433,7 @@ def m_grouped_gemm(
         a, 
         # torch.compile(fullgraph=True) does not supporting passing in tuples
         a.stride(0), a.stride(1),
-        b,
+        b_desc if use_b_tensor_descriptor else b,
         b.stride(0), b.stride(1), b.stride(2),
         out,
         out.stride(0), out.stride(1),
@@ -440,6 +448,7 @@ def m_grouped_gemm(
         SCATTER_ROWS=params.scatter,
         IS_A_TRANSPOSED=params.is_a_transposed,
         IS_B_TRANSPOSED=params.is_b_transposed,
+        USE_B_TENSOR_DESCRIPTOR=use_b_tensor_descriptor,
         EPILOGUE=epilogue,
         **default_kwargs
     )

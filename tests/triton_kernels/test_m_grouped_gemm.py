@@ -226,13 +226,13 @@ def test_m_grouped_gemm_scatter(
 @pytest.mark.parametrize("num_tokens,num_experts,K,N,a_store_transpose,a_eval_transpose,b_store_transpose,b_eval_transpose", [
     (1000, 4, 512, 512, False, False, False, False),
     # Inputs are stored transposed, row major order
-    (1000, 4, 512, 512, False, False, True, False),
-    (1000, 4, 512, 512, True, False, False, False),
-    (1000, 4, 512, 512, True, False, True, False),
+    (1000, 4, 1024, 512, False, False, True, False),
+    (1000, 4, 1024, 512, True, False, False, False),
+    (1000, 4, 1024, 512, True, False, True, False),
     # Evaluate transpose in kernel
-    (1000, 4, 512, 512, False, False, False, True),
-    (1000, 4, 512, 512, False, True, False, False),
-    (1000, 4, 512, 512, False, True, False, True),
+    (1000, 4, 1024, 512, False, False, False, True),
+    (1000, 4, 1024, 512, False, True, False, False),
+    (1000, 4, 1024, 512, False, True, False, True),
 ])
 def test_m_grouped_gemm_layouts(
     num_tokens: int,

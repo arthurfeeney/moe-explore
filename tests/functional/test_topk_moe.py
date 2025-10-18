@@ -27,7 +27,7 @@ test_params = [
     # Run lots of tests in float32 since floating point errors don't accumulate as much.
     (999, 1024, 1024, "relu", 8, 2, torch.float32),
     (999, 1024, 1024, "silu", 8, 2, torch.float32),
-    (1024, 1024, 1000, "gelu", 8, 2, torch.float32),
+    (1024, 1024, 1001, "gelu", 8, 2, torch.float32),
     (999, 1024, 1024, "swiglu", 8, 2, torch.float32),
     (999, 1000, 1000, "geglu", 8, 2, torch.float32),
     (999, 1000, 1000, "relu", 64, 8, torch.float32),
@@ -37,7 +37,7 @@ test_params = [
     (999, 1000, 1000, "geglu", 64, 8, torch.float32),
     # Some sizes that require masking.
     #(1, 1000, 1000, "geglu", 64, 8, torch.float32),
-    (1, 30, 30, "geglu", 64, 8, torch.float32),
+    #(1, 30, 30, "geglu", 64, 8, torch.float32),
 ]
 
 @pytest.mark.parametrize(

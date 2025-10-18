@@ -1,7 +1,6 @@
 import torch
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm as triton_m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.k_grouped_gemm import k_grouped_gemm as triton_k_grouped_gemm, KGroupedGEMMParams
-from moe_explore.triton_kernels.row_gather_scatter import row_gather, row_scatter
 from moe_explore.functional.activation import activation as activation_func
 from typing import Optional
 
@@ -63,11 +62,16 @@ def m_grouped_gemm_backward(
         scatter=forward_gather,
         num_tokens=num_tokens,
         topk=topk,
-        activation=None,#activation,
+        activation=None,
         is_a_transposed=False,
-        is_b_transposed=False
+        is_b_transposed=True
     )
-    grad_tokens = triton_m_grouped_gemm(grad_output, weight.permute(0, 2, 1), group_indices, grad_token_params)
+    grad_tokens = triton_m_grouped_gemm(
+        grad_output, 
+        weight,
+        group_indices, 
+        grad_token_params)
+    
     if forward_gather:
         # The scatter is fused, but we need to reduce across the top-k entries.
         grad_tokens = grad_tokens.view(-1, topk, tokens.size(-1)).sum(dim=1)
