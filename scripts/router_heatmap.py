@@ -12,6 +12,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-l", "--load-pt", type=str, required=True)
 args = parser.parse_args()
 
+print(f"Loading {args.load_pt}")
 data = torch.load(args.load_pt)
 
 print("Visualizing:")
@@ -23,10 +24,12 @@ model_name: Optional[str] = data.get("model_name")
 dataset_name: Optional[str] = data.get("dataset_name")
 
 expert_counts = expert_counts.numpy()
-expert_percentages = 100 * (expert_counts / num_tokens)
+# NOTE: this assumes topk=8, which is true for qwen and olmoe.
+expert_percentages = 100 * (expert_counts / (8 * num_tokens))
 
 for i in range(0, expert_percentages.shape[0], 10):
-    print(f"Percentaages for layer {i}: {expert_percentages[i].tolist()}")
+    ep = expert_percentages[i].tolist()
+    print(f"Percentaages for layer {i}: {ep}, sum={sum(ep)}")
 
 ax = seaborn.heatmap(expert_percentages, cbar_kws={"label": "Routing Percentages"})
 ax.set(xlabel="Expert", ylabel="Layer")
@@ -45,7 +48,7 @@ if dataset_name is not None:
 if model_name is not None:
     fig_name_parts.append(model_name)
 fig_name_parts.append("percentages")
-fig_name = f"{'_'.join(fig_name_parts)}.png"
+fig_name = f"{'_'.join(fig_name_parts)}.pdf"
 print(f"Saving to {fig_name}")
 
 plt.savefig(fig_name, transparent=True)
@@ -54,4 +57,3 @@ for idx in range(expert_percentages.shape[0]):
     min_perc = expert_percentages[idx].min()
     max_perc = expert_percentages[idx].max()
     print(f"layer {idx}: min={min_perc}, max={max_perc}")
-

@@ -66,7 +66,12 @@ def main():
 
     model.eval()
     with torch.no_grad():
-        expert_counts = torch.zeros(model_config.num_hidden_layers, model_config.num_experts, device="cpu")
+        expert_counts = torch.zeros(
+            model_config.num_hidden_layers,
+            model_config.num_experts, 
+            device="cpu",
+            dtype=torch.int64
+        )
         for step in range(0, num_tokens, seq_len):
             print(f"step {step}")
             input_ids = tokenized_dataset.input_ids[..., step:step + seq_len]
@@ -100,6 +105,10 @@ def tokenized_wikitext(tokenizer, cache_dir):
     return tokens
 
 def router(router_logits, topk):
+    r"""
+    Since this only checks the routed experts, we don't need condition to normmalize
+    the routing scores--the selected experts won't change.
+    """
     routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
     _, selected_experts = torch.topk(routing_weights, topk, dim=-1)
     return selected_experts
