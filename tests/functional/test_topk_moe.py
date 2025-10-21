@@ -11,7 +11,8 @@ from moe_explore.router import router
 from moe_explore.params import MOEParams
 from moe_explore.testing import random_mlp, random_topk_router, assert_close, random_interleaved_glu
 from moe_explore.baseline.huggingface import make_huggingface_moe, set_huggingface_moe_weights
-from moe_explore.baseline.transformer_engine import TransformerEngineMoE
+from moe_explore.baseline.torch_grouped_mm import TorchGroupedMMMoE
+#from moe_explore.baseline.transformer_engine import TransformerEngineMoE
 
 test_params = [
     # This test runs the full forward and backward pass. With low precision and
@@ -158,6 +159,63 @@ def test_hf_moe():
     
     assert_close(output, hf_hidden_states.squeeze(0)) 
     
+def test_torch_moe():
+    num_experts = 16
+    seq_len = 128
+    input_dim = 128
+    hidden_dim = 256
+    activation = "swiglu"
+    topk = 4
+    dtype = torch.bfloat16
+    
+    router_params = random_topk_router(
+        num_experts,
+        input_dim,
+        topk,
+        softmax_before_topk=True,
+        normalize_routing=False,
+        device="cuda",
+        dtype=dtype
+    )    
+    mlp_params = random_interleaved_glu(num_experts, input_dim, hidden_dim, activation, device="cuda", dtype=dtype)
+    moe_params = MOEParams(
+        router_params,
+        mlp_params,
+        num_experts,
+        topk
+    )
+    
+    input = torch.randn((seq_len, input_dim), device="cuda", dtype=dtype)
+    
+    input.requires_grad = True
+    moe_params.expert_params.weight1.requires_grad = True
+    moe_params.expert_params.weight2.requires_grad = True
+    
+    output = topk_moe(input, moe_params)
+    output.sum().backward()
+    input_grad = input.grad.data.clone()
+    weight1_grad = moe_params.expert_params.weight1.grad.data.clone()
+    weight2_grad = moe_params.expert_params.weight2.grad.data.clone()
+    
+    input.grad.data.zero_()
+    moe_params.expert_params.weight1.grad.data.zero_()
+    moe_params.expert_params.weight2.grad.data.zero_()
+    
+    moe = TorchGroupedMMMoE(input_dim, hidden_dim, num_experts, topk, activation, dtype).to("cuda").to(dtype)
+    moe.init_weights(moe_params.expert_params.weight1, moe_params.expert_params.weight2)
+    ref = moe(input, lambda x: router(x, router_params))
+    ref.sum().backward()
+    
+    ref_input_grad = input.grad.data.clone()
+    ref_weight1_grad = moe.weight1.grad.data.clone()
+    ref_weight2_grad = moe.weight2.grad.data.clone()
+        
+    assert_close(output, ref)
+    assert_close(input_grad, ref_input_grad)
+    assert_close(weight1_grad, ref_weight1_grad)
+    assert_close(weight2_grad, ref_weight2_grad)
+    
+"""
 def test_te_moe():
     num_experts = 16
     seq_len = 128
@@ -196,3 +254,4 @@ def test_te_moe():
     te_output = te_moe(input, lambda x: router(x, router_params))
     
     assert_close(output, te_output)
+"""
