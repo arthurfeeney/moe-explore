@@ -20,6 +20,10 @@ def m_grouped_mlp_forward(
     assert group_indices.size(0) == weight1.size(0) + 1
     assert group_indices.size(0) == weight2.size(0) + 1
     assert num_tokens > 0 and topk > 0
+    
+    # always fuse the activation during inference
+    fused_act = not (torch.is_grad_enabled() and tokens.requires_grad)
+
     pre_activation = m_grouped_gemm_forward(
         tokens,
         weight1,
@@ -29,10 +33,10 @@ def m_grouped_mlp_forward(
         scatter=False,
         num_tokens=num_tokens,
         topk=topk,
-        activation=None#activation
+        activation=activation if fused_act else None
     )
-    
-    if activation is not None:
+
+    if activation is not None and not fused_act:
         intermediate = activation_func(pre_activation, activation)
     else:
         intermediate = pre_activation
@@ -70,6 +74,7 @@ def m_grouped_mlp_backward(
     assert group_indices.size(0) == weight1.size(0) + 1
     assert group_indices.size(0) == weight2.size(0) + 1
     assert num_tokens > 0 and topk > 0
+    
     grad_intermediate, grad_weight2 = m_grouped_gemm_backward(
         grad_output,
         activation_func(intermediate, activation),

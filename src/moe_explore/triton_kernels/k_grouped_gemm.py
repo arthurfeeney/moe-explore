@@ -12,7 +12,8 @@ from .autotune_config import (
     fast_autotune_configs, 
     max_autotune_configs
 )
-from .epilogue_split import epilogue_split, store_split_epilogue, store_split_epilogue_tensor_descriptor
+from .epilogue_split import epilogue_split, store_split_epilogue
+from .tile_util import get_tile_id_in_group, tile_offsets_in_group
 
 @dataclass
 class KGroupedGEMMParams:
@@ -75,30 +76,10 @@ def k_grouped_gemm_inner_kernel(
         
         tile_id_in_gemm = tile_id - last_problem_end
 
-        if CACHE_GROUP_M == 0:
-            tile_m_idx = (tile_id_in_gemm // num_n_tiles) * BLOCK_M
-            tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
-        else:
-            # On 3.4.0, working around several potential compiler bugs. 
-            # 1. triton doesn't like multiplying the group size with the num_n_tiles. Going through another
-            # variable, group_m, gets it to compile. It also doesn't work to manually inline a group size.
-            # 2. trying to use tl.swizzle2d or putting into a func hits a "failures [...]
-            # while processing an MLIR pass pipeline"
-            group_m = CACHE_GROUP_M
-            num_tiles_in_group = group_m * num_n_tiles
-            group_id = tile_id_in_gemm // num_tiles_in_group
-            first_id_m = group_id * group_m
-            group_size_m = min(num_m_tiles - first_id_m, group_m)
-            tile_m_idx = (first_id_m + ((tile_id_in_gemm % num_tiles_in_group) % group_size_m)) * BLOCK_M
-            tile_n_idx = ((tile_id_in_gemm % num_tiles_in_group) // group_size_m) * BLOCK_N
-
-        tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
-        tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
-        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
-        tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets % N, BLOCK_N), BLOCK_N)
-
-        # NOTE: The kernel has to step DOWN the permute_indices... 
-        # We have to load the permute indices inside the inner loop...
+        tile_m_idx, tile_n_idx = get_tile_id_in_group(
+            tile_id_in_gemm, M, N, BLOCK_M, BLOCK_N, CACHE_GROUP_M)
+        tile_m_offsets, tile_n_offsets = tile_offsets_in_group(
+            tile_m_idx, tile_n_idx, M, N, BLOCK_M, BLOCK_N)
         
         k_offset = tl.arange(0, BLOCK_K)
         

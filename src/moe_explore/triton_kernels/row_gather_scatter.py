@@ -9,10 +9,10 @@ import triton.language as tl
 @triton.jit
 def row_gather_kernel(
     tokens_ptr,
-    tokens_strides,
+    token_strides_1, token_strides_2,
     gather_indices_ptr,
     output_ptr,
-    output_strides,
+    output_strides_1, output_strides_2,
     OUTPUT_NUM_ROWS: tl.constexpr,
     OUTPUT_NUM_COLS: tl.constexpr,
     BLOCK_SIZE_DIM1: tl.constexpr,
@@ -25,11 +25,11 @@ def row_gather_kernel(
     gather_row_indices = tl.load(gather_indices_ptr + output_row_offsets, mask=output_row_offsets < OUTPUT_NUM_ROWS, other=0)
     col_offsets = pid_dim2 * BLOCK_SIZE_DIM2 + tl.arange(0, BLOCK_SIZE_DIM2)
 
-    tokens_offsets = (gather_row_indices * tokens_strides[0])[:, None] + col_offsets * tokens_strides[1]
+    tokens_offsets = (gather_row_indices * token_strides_1)[:, None] + col_offsets * token_strides_2
     tokens_ptrs = tokens_ptr + tokens_offsets
     tokens = tl.load(tokens_ptrs, mask=(col_offsets < OUTPUT_NUM_COLS)[None, :], other=0.0)
 
-    output_offsets = (output_row_offsets * output_strides[0])[:, None] + col_offsets * output_strides[1]
+    output_offsets = (output_row_offsets * output_strides_1)[:, None] + col_offsets * output_strides_2
     output_ptrs = output_ptr + output_offsets
     tl.store(output_ptrs, tokens, mask=(output_row_offsets < OUTPUT_NUM_ROWS)[:, None] & (col_offsets < OUTPUT_NUM_COLS))
 
@@ -47,10 +47,10 @@ def row_gather(
     )
     row_gather_kernel[grid](
         tokens,
-        tokens.stride(),
+        tokens.stride(0), tokens.stride(1),
         gather_indices,
         output,
-        output.stride(),
+        output.stride(0), output.stride(1),
         output.size(0),
         output.size(1)
     )
@@ -64,10 +64,10 @@ def row_gather(
 @triton.jit
 def row_scatter_kernel(
     tokens_ptr,
-    tokens_strides,
+    token_strides_1, token_strides_2,
     scatter_indices_ptr,
     output_ptr,
-    output_strides,
+    output_strides_1, output_strides_2,
     OUTPUT_NUM_ROWS: tl.constexpr,
     OUTPUT_NUM_COLS: tl.constexpr,
     BLOCK_SIZE_DIM1: tl.constexpr,
@@ -79,12 +79,12 @@ def row_scatter_kernel(
     row_offsets = pid_dim1 * BLOCK_SIZE_DIM1 + tl.arange(0, BLOCK_SIZE_DIM1)
     col_offsets = pid_dim2 * BLOCK_SIZE_DIM2 + tl.arange(0, BLOCK_SIZE_DIM2)
 
-    tokens_offsets = (row_offsets * tokens_strides[0])[:, None] + col_offsets * tokens_strides[1]
+    tokens_offsets = (row_offsets * token_strides_1)[:, None] + col_offsets * token_strides_2
     tokens_ptrs = tokens_ptr + tokens_offsets
     tokens = tl.load(tokens_ptrs, mask=(row_offsets < OUTPUT_NUM_ROWS)[:, None] & (col_offsets < OUTPUT_NUM_COLS), other=0.0)
 
     scatter_row_indices = tl.load(scatter_indices_ptr + row_offsets, mask=row_offsets < OUTPUT_NUM_ROWS, other=0)
-    output_offsets = (scatter_row_indices * output_strides[0])[:, None] + col_offsets * output_strides[1]
+    output_offsets = (scatter_row_indices * output_strides_1)[:, None] + col_offsets * output_strides_2
     output_ptrs = output_ptr + output_offsets
     tl.store(output_ptrs, tokens, mask=(row_offsets < OUTPUT_NUM_ROWS)[:, None] & (col_offsets < OUTPUT_NUM_COLS))
 
@@ -105,10 +105,10 @@ def row_scatter(
     )
     row_scatter_kernel[grid](
         tokens,
-        tokens.stride(),
+        tokens.stride(0), tokens.stride(1),
         scatter_indices,
         output,
-        output.stride(),
+        output.stride(0), output.stride(1),
         output.size(0),
         output.size(1)
     )

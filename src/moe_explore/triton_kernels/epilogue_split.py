@@ -1,6 +1,48 @@
 import triton
 import triton.language as tl
+from moe_explore.triton_kernels.activation import (
+    relu,
+    silu,
+    gelu,
+    swiglu,
+    geglu,
+    grad_relu,
+    grad_silu,
+    grad_gelu,
+    grad_swiglu,
+    grad_geglu
+)
 
+@triton.jit
+def activation(x: tl.tensor, ACT: tl.constexpr):
+    r"""
+    torch.compile(fullgraph=True) on 2.8.0 complained about passing a triton
+    function as a parameter to a kernel, so instead we pass in a string
+    and determine the activation here.
+    """
+    if ACT == "relu":
+        return relu(x)
+    elif ACT == "silu":
+        return silu(x)
+    elif ACT == "gelu":
+        return gelu(x)
+    elif ACT == "swiglu":
+        return swiglu(x)
+    elif ACT == "geglu":
+        return geglu(x)
+    elif ACT == "grad_relu":
+        return grad_relu(x)
+    elif ACT == "grad_silu":
+        return grad_silu(x)
+    elif ACT == "grad_gelu":
+        return grad_gelu(x)
+    elif ACT == "grad_swiglu":
+        return grad_swiglu(x)
+    elif ACT == "grad_geglu":
+        return grad_geglu(x)
+    else:
+        return x
+    
 @triton.jit
 def epilogue_split(
     acc,
@@ -21,10 +63,9 @@ def epilogue_split(
         acc = tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2))
         acc = tl.permute(acc, (0, 2, 1))
         acc0, acc1 = tl.split(acc)
-        accs = (EPILOGUE(acc0), EPILOGUE(acc1)) if EPILOGUE is not None else (acc0, acc1)
+        accs = (activation(acc0, EPILOGUE), activation(acc1, EPILOGUE))
     else:
-        accs = (EPILOGUE(acc),) if EPILOGUE is not None else (acc,)
-    
+        accs = (activation(acc, EPILOGUE),)
     return accs
 
 @triton.jit

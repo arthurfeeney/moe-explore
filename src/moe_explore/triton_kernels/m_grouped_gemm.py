@@ -6,6 +6,7 @@ import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
+from moe_explore.triton_kernels.tile_util import get_tile_id_in_group, tile_offsets_in_group
 from .activation import TRITON_ACTIVATIONS
 from .autotune_config import (
     AutotuneMode, 
@@ -42,7 +43,7 @@ def m_grouped_gemm_inner_kernel(
     start_idx,
     end_idx,
     last_problem_end,
-    # Input parameters
+    # Input parameters,
     a_ptr,
     a_stride_1, a_stride_2,
     b_ptr,
@@ -59,6 +60,7 @@ def m_grouped_gemm_inner_kernel(
     SCATTER_ROWS: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
+    USE_A_TENSOR_DESCRIPTOR: tl.constexpr,
     USE_B_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
@@ -77,37 +79,26 @@ def m_grouped_gemm_inner_kernel(
     end_tile_id = last_problem_end + num_tiles
     tl.assume(end_tile_id >= tile_id)
     
+    if USE_A_TENSOR_DESCRIPTOR:
+        a_desc = tl.make_tensor_descriptor(
+            a_ptr + start_idx * K,
+            shape=(m, K),
+            strides=(K, 1), # Assuming row major order
+            block_shape=(BLOCK_M, BLOCK_K)
+        )
+    
     # TODO: Struggling to get this loop to flatten, so the pipeline has bubbles.
     # Checking ttgir, clearly the loops are not being fused and there is an async_wait
     # after the inner mma loop. Same output with either flatten=True/False
     for _ in tl.range(tile_id, end_tile_id, NUM_PROGRAMS, flatten=True):
         
         tile_id_in_gemm = tile_id - last_problem_end
-
-        if CACHE_GROUP_M == 0:
-            tile_m_idx = (tile_id_in_gemm // num_n_tiles) * BLOCK_M
-            tile_n_idx = (tile_id_in_gemm % num_n_tiles) * BLOCK_N
-        else:
-            # On 3.4.0, working around several potential compiler bugs. 
-            # 1. triton doesn't like multiplying the group size with the num_n_tiles. Going through another
-            # variable, group_m, gets it to compile. It also doesn't work to manually inline a group size.
-            # 2. trying to use tl.swizzle2d or putting into a func hits a "failures [...]
-            # while processing an MLIR pass pipeline"
-            group_m = CACHE_GROUP_M
-            num_tiles_in_group = group_m * num_n_tiles
-            group_id = tile_id_in_gemm // num_tiles_in_group
-            first_id_m = group_id * group_m
-            group_size_m = min(num_m_tiles - first_id_m, group_m)
-            tile_m_idx = (first_id_m + ((tile_id_in_gemm % num_tiles_in_group) % group_size_m)) * BLOCK_M
-            tile_n_idx = ((tile_id_in_gemm % num_tiles_in_group) // group_size_m) * BLOCK_N
-
-        tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
-        tile_n_offsets = tile_n_idx + tl.arange(0, BLOCK_N)
-        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % m, BLOCK_M), BLOCK_M)
-        tile_n_offsets = tl.max_contiguous(tl.multiple_of(tile_n_offsets % N, BLOCK_N), BLOCK_N)
+        tile_m_idx, tile_n_idx = get_tile_id_in_group(
+            tile_id_in_gemm, m, N, BLOCK_M, BLOCK_N, CACHE_GROUP_M)
+        tile_m_offsets, tile_n_offsets = tile_offsets_in_group(
+            tile_m_idx, tile_n_idx, m, N, BLOCK_M, BLOCK_N)
         
         if GATHER_ROWS:
-            # Can avoid masking, since oversets are 0 <= tile_m_offsets < m
             permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)
             a_indices = permute_a_indices // TOPK
         else:
@@ -132,28 +123,36 @@ def m_grouped_gemm_inner_kernel(
                 b_row_offsets = k_offset * b_stride_2
                 b_col_offsets = tile_n_offsets * b_stride_3            
             b_ptrs = b_ptr + b_problem_offset + b_row_offsets[:, None] + b_col_offsets
-        
+
         n_mask = tile_n_offsets < N
         token_mask = start_idx + tile_m_offsets < end_idx
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
-            tl.multiple_of(a_ptrs, [16, 16])
+            if not USE_A_TENSOR_DESCRIPTOR:
+                tl.multiple_of(a_ptrs, [16, 16])
             if not USE_B_TENSOR_DESCRIPTOR:
-               tl.multiple_of(b_ptrs, [16, 16])
-            
+                tl.multiple_of(b_ptrs, [16, 16])
+
             k_remaining = K - k * BLOCK_K
-            a_mask = token_mask[:, None] & (k_offset < k_remaining)
+            if not USE_A_TENSOR_DESCRIPTOR:
+                a_mask = token_mask[:, None] & (k_offset < k_remaining)
+                if IS_A_TRANSPOSED:
+                    a_mask = a_mask.T
             if not USE_B_TENSOR_DESCRIPTOR:
                 b_mask = n_mask[None, :] & (k_offset[:, None] < k_remaining)
-            
-            if IS_A_TRANSPOSED:
-                a_mask = a_mask.T
-            if IS_B_TRANSPOSED and not USE_B_TENSOR_DESCRIPTOR:
-                b_mask = b_mask.T
+                if IS_B_TRANSPOSED:
+                    b_mask = b_mask.T
 
-            a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)            
+            if USE_A_TENSOR_DESCRIPTOR:
+                a_block = a_desc.load([tile_m_idx, k * BLOCK_K])
+            else:
+                a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
+        
             if USE_B_TENSOR_DESCRIPTOR:
+                # TODO: .reshape is used because we're loading 3d [1, block1, block2] tiles
+                # this could be removed by taking a 2d view, but I'm pretty sure this
+                # is a no-op?
                 if not IS_B_TRANSPOSED:
                     b_block = b_ptr.load([problem_id, k * BLOCK_K, tile_n_idx])
                     b_block = tl.reshape(b_block, (BLOCK_K, BLOCK_N))
@@ -181,19 +180,21 @@ def m_grouped_gemm_inner_kernel(
                 else:
                     b_ptrs += BLOCK_K * b_stride_2
 
-        # Splitting the epilogue is supposed to help overlap the next iteration 
-        # of the outer loop with the epilogue.
         accs = epilogue_split(acc, EPILOGUE_SPLIT, EPILOGUE, BLOCK_M, BLOCK_N)
 
+        tile_id_in_gemm = tile_id - last_problem_end
+        tile_m_idx, tile_n_idx = get_tile_id_in_group(
+            tile_id_in_gemm, m, N, BLOCK_M, BLOCK_N, CACHE_GROUP_M)
         tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
         tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % m, BLOCK_M), BLOCK_M)
+        
         a_mask = start_idx + tile_m_offsets < end_idx
         # The accumulators are all the same size, but the EPILOGUE may change the 
         # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
         out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
         out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
 
-        if SCATTER_ROWS:    
+        if SCATTER_ROWS:
             # Can avoid masking, since offsets are 0 <= tile_m_offsets < m
             permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)     
             out_offsets = permute_a_indices[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
@@ -204,7 +205,7 @@ def m_grouped_gemm_inner_kernel(
             out_ptrs = out_ptr + out_offsets
 
         store_split_epilogue(out_ptrs, out_stride_2, a_mask, N - tile_n_idx, accs)
-
+    
         tile_id += NUM_PROGRAMS
     
     return tile_id, num_tiles
@@ -228,6 +229,7 @@ def m_grouped_gemm_persistent_kernel(
     SCATTER_ROWS: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
+    USE_A_TENSOR_DESCRIPTOR: tl.constexpr,
     USE_B_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
     NUM_PROGRAMS: tl.constexpr,
@@ -252,7 +254,7 @@ def m_grouped_gemm_persistent_kernel(
     tl.assume(out_stride_2 > 0)
     
     start_idx = 0
-    for problem_id in tl.range(0, NUM_EXPERTS):
+    for problem_id in tl.range(0, NUM_EXPERTS, loop_unroll_factor=2):
         end_idx = tl.load(group_indices_ptr + problem_id + 1, cache_modifier=".ca")
         m = end_idx - start_idx
         
@@ -260,14 +262,7 @@ def m_grouped_gemm_persistent_kernel(
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
         tl.assume(m <= NUM_TOKENS * TOPK)
-                
-        num_m_tiles = tl.cdiv(m, BLOCK_M)
-        num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)    
-        num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
-        tl.assume(num_tiles >= 0)
-        end_tile_id = last_problem_end + num_tiles
-        tl.assume(end_tile_id >= tile_id)
-        
+
         tile_id, num_tiles = m_grouped_gemm_inner_kernel(
             problem_id,
             tile_id,
@@ -290,6 +285,7 @@ def m_grouped_gemm_persistent_kernel(
             SCATTER_ROWS,
             IS_A_TRANSPOSED,
             IS_B_TRANSPOSED,
+            USE_A_TENSOR_DESCRIPTOR,
             USE_B_TENSOR_DESCRIPTOR,
             NUM_PROGRAMS,
             BLOCK_M,
@@ -300,7 +296,7 @@ def m_grouped_gemm_persistent_kernel(
             EPILOGUE_SPLIT,
             DISALLOW_ACC_MULTI_BUFFER
         )
-        
+    
         start_idx = end_idx
         last_problem_end += num_tiles 
 
@@ -324,48 +320,20 @@ def m_grouped_gemm_default_config(e, params, dtype):
     if dtype == torch.float32:
         BLOCK_N //= 2
         num_stages -= 1
-    if not (params.gather or params.scatter):
-        default_config = triton.Config({
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
-                "NUM_PROGRAMS": get_gpu_sm_count(),
-                "CACHE_GROUP_M": 8,
-                "EPILOGUE_SPLIT": 2,
-                "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_B_TENSOR_DESCRIPTOR": True
-            },
-            num_warps=8, 
-            num_stages=num_stages
-        )
-    elif params.gather:
-        default_config = triton.Config({
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
-                "NUM_PROGRAMS": get_gpu_sm_count(),
-                "CACHE_GROUP_M": 8,
-                "EPILOGUE_SPLIT": 2,
-                "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_B_TENSOR_DESCRIPTOR": True
-            },
-            num_warps=8, 
-            num_stages=num_stages
-        )
-    elif params.scatter:
-        default_config = triton.Config({
-                "BLOCK_M": BLOCK_M, 
-                "BLOCK_N": BLOCK_N, 
-                "BLOCK_K": BLOCK_K, 
-                "NUM_PROGRAMS": get_gpu_sm_count(),
-                "CACHE_GROUP_M": 8,
-                "EPILOGUE_SPLIT": 2,
-                "DISALLOW_ACC_MULTI_BUFFER": False,
-                "USE_B_TENSOR_DESCRIPTOR": True
-            },
-            num_warps=8, 
-            num_stages=num_stages
-        )
+    default_config = triton.Config({
+            "BLOCK_M": BLOCK_M, 
+            "BLOCK_N": BLOCK_N, 
+            "BLOCK_K": BLOCK_K, 
+            "NUM_PROGRAMS": get_gpu_sm_count(),
+            "CACHE_GROUP_M": 8,
+            "EPILOGUE_SPLIT": 2,
+            "DISALLOW_ACC_MULTI_BUFFER": False,
+            "USE_A_TENSOR_DESCRIPTOR": False,
+            "USE_B_TENSOR_DESCRIPTOR": False
+        },
+        num_warps=8, 
+        num_stages=num_stages
+    )
     return default_config
 
 def m_grouped_gemm(
@@ -406,17 +374,25 @@ def m_grouped_gemm(
     
     block_k, block_n = default_kwargs["BLOCK_K"], default_kwargs["BLOCK_N"]
     use_b_tensor_descriptor = default_kwargs["USE_B_TENSOR_DESCRIPTOR"]
-    # only use descriptors when strides are 16-byte aligned
-    use_b_tensor_descriptor = use_b_tensor_descriptor and all([(s * b.element_size()) % 16 == 0 for s in b.stride()])
+    del default_kwargs["USE_B_TENSOR_DESCRIPTOR"]
+    # only use descriptors when all strides, except last, are 16-byte aligned
+    use_b_tensor_descriptor = use_b_tensor_descriptor and all([(s * b.element_size()) % 16 == 0 for s in b.stride()[:-1]])
     if use_b_tensor_descriptor: 
         if params.is_b_transposed:
             block_size = [1, block_n, block_k]
         else:
             block_size = [1, block_k, block_n]
         b_desc = TensorDescriptor.from_tensor(b, block_size)
+        
+    use_a_tensor_descriptor = default_kwargs["USE_A_TENSOR_DESCRIPTOR"]
+    del default_kwargs["USE_A_TENSOR_DESCRIPTOR"]
+    use_a_tensor_descriptor = use_a_tensor_descriptor and all([(s * a.element_size()) % 16 == 0 for s in a.stride()[:-1]])
+    if use_a_tensor_descriptor:
+        # TMA descriptors require a global memory allocation
+        def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+            return torch.empty(size, device="cuda", dtype=torch.int8)
+        triton.set_allocator(alloc_fn)
 
-    del default_kwargs["USE_B_TENSOR_DESCRIPTOR"]
-    
     func = m_grouped_gemm_persistent_kernel
     #if autotune_mode == AutotuneMode.FAST:
     #    func = _fast_autotune_m_grouped_gemm_persistent_kernel
@@ -424,9 +400,10 @@ def m_grouped_gemm(
     #elif autotune_mode == AutotuneMode.MAX:
     #    func = _max_autotune_m_grouped_gemm_persistent_kernel
     #    default_kwargs = {}
-        
-    epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
-            
+    
+    # TODO: torch.compile doesn't like passing in function    
+    epilogue = params.activation
+           
     grid = lambda META: (META["NUM_PROGRAMS"],)
 
     func[grid](
@@ -448,9 +425,10 @@ def m_grouped_gemm(
         SCATTER_ROWS=params.scatter,
         IS_A_TRANSPOSED=params.is_a_transposed,
         IS_B_TRANSPOSED=params.is_b_transposed,
+        USE_A_TENSOR_DESCRIPTOR=use_a_tensor_descriptor,
         USE_B_TENSOR_DESCRIPTOR=use_b_tensor_descriptor,
         EPILOGUE=epilogue,
         **default_kwargs
     )
-    
+        
     return out
