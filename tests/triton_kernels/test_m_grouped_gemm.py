@@ -1,6 +1,6 @@
 import math
 import torch
-from moe_explore.triton_kernels.m_grouped_gemm import (
+from moe_explore.triton_kernels.m_grouped_gemm_manual import (
     m_grouped_gemm,
     MGroupedGEMMParams
 )
@@ -11,7 +11,7 @@ from moe_explore.testing import torch_grouped_matmul_gather_scatter, random_rout
 import pytest
 try:
     from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
-except ImportError:
+except:
     GroupedLinear = None
 
 @pytest.mark.parametrize("num_tokens,num_experts,K,N,activation,dtype", [
@@ -25,7 +25,6 @@ except ImportError:
     (1000, 16, 1024, 1024, "grad_silu", torch.bfloat16),
     (1000, 16, 1024, 1024, "grad_gelu", torch.bfloat16),
     (1000, 16, 1024, 1024, "swiglu", torch.bfloat16),
-    (16000, 16, 1024, 1024, "geglu", torch.bfloat16),
     (16000, 16, 1024, 1024, "geglu", torch.bfloat16),
     # TODO: Group size one is broken.
     #(1000, 1, 1024, 1024, "geglu", torch.bfloat16),
@@ -313,14 +312,8 @@ def test_te_grouped_linear():
     
     grouped_linear = GroupedLinear(num_experts, K, N, bias=False, params_dtype=dtype)
     
-    
-    print(grouped_linear.weight1.data[0, :5])
-    
     for i in range(num_experts):
         getattr(grouped_linear, f"weight{i}").data[:] = weight[i].t()
-    
-    print(weight[0, 0, :5])
-    print(grouped_linear.weight1.data[0, :5])
     
     m_splits = (group_indices[1:] - group_indices[:-1]).tolist()
     ref = grouped_linear(input, m_splits=m_splits, is_first_microbatch=None)

@@ -6,6 +6,7 @@ from moe_explore.params import RouterParams, TopkRouterParams, ErnieRouterParams
 def softmax(x):
     return nn.functional.softmax(x, dim=-1, dtype=torch.float32)
 
+@torch.compile
 def router(input:torch.Tensor, params: RouterParams):
     if isinstance(params, TopkRouterParams):
         return topk_router(input, params)
