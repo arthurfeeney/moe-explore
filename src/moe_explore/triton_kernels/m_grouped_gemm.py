@@ -70,7 +70,6 @@ def m_grouped_gemm_inner_kernel(
     m,
     K: tl.constexpr,
     N: tl.constexpr,
-    POST_ACT_BLOCK_N: tl.constexpr,
     TOPK: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
@@ -226,15 +225,14 @@ def m_grouped_gemm_inner_kernel(
 
             out = activation(pre, EPILOGUE, None) if EPILOGUE is not None else pre
 
-            tl.static_assert(out.shape[1] * EPILOGUE_SPLIT == POST_ACT_BLOCK_N)
-            out_tile_n_idx = tile_n_idx // BLOCK_N * POST_ACT_BLOCK_N
+            out_tile_n_idx = tile_n_idx // BLOCK_N * (out.shape[1] * EPILOGUE_SPLIT)
             out_tile_n_offsets = out_tile_n_idx + tl.arange(0, out.shape[1])
             out_ptrs = out_ptr + tile_m_indices[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
             n_offset = tl.arange(0, out.shape[1])
             epilogue_split_offset = i * out.shape[1]
             
             # output n-dimension depends on the activation function
-            if BLOCK_N > POST_ACT_BLOCK_N:
+            if BLOCK_N > (out.shape[1] * EPILOGUE_SPLIT):
                 OUT_N = N // 2
             else:
                 OUT_N = N
@@ -269,7 +267,6 @@ def m_grouped_gemm_persistent_kernel(
     NUM_EXPERTS: tl.constexpr,
     K: tl.constexpr,
     N: tl.constexpr,
-    POST_ACT_BLOCK_N: tl.constexpr,
     TOPK: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
@@ -287,7 +284,6 @@ def m_grouped_gemm_persistent_kernel(
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     GRAD_ACT: tl.constexpr,
-    DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -340,7 +336,6 @@ def m_grouped_gemm_persistent_kernel(
             m,
             K,
             N,
-            POST_ACT_BLOCK_N,
             TOPK,
             GATHER_ROWS,
             SCATTER_ROWS,
@@ -441,10 +436,6 @@ def m_grouped_gemm(
     
     out, preactivation = _build_outputs(num_tokens, n, a.device, a.dtype, params)
     
-    out.requires_grad = a.requires_grad
-    if preactivation is not None:
-        preactivation.requires_grad = a.requires_grad
-    
     default_config = m_grouped_gemm_default_config(b.size(0), params, a.dtype)
     default_kwargs = default_config.all_kwargs()
     # torch.compile(fullgraph=True) does not supporting passing in num_ctas
@@ -471,21 +462,17 @@ def m_grouped_gemm(
             return torch.empty(size, device="cuda", dtype=torch.int8)
         triton.set_allocator(alloc_fn)
     
-    #num_tiles = triton.cdiv(out.size(0), default_kwargs["BLOCK_M"]) * triton.cdiv(n, default_kwargs["BLOCK_N"])
-    #default_kwargs["NUM_PROGRAMS"] = min(default_kwargs["NUM_PROGRAMS"], num_tiles)
-
     func = m_grouped_gemm_persistent_kernel
-    #if autotune_mode == AutotuneMode.FAST:
-    #    func = _fast_autotune_m_grouped_gemm_persistent_kernel
-    #    default_kwargs = {}
-    #elif autotune_mode == AutotuneMode.MAX:
-    #    func = _max_autotune_m_grouped_gemm_persistent_kernel
-    #    default_kwargs = {}
+    if autotune_mode == AutotuneMode.FAST:
+        func = _fast_autotune_m_grouped_gemm_persistent_kernel
+        default_kwargs = {}
+    elif autotune_mode == AutotuneMode.MAX:
+        func = _max_autotune_m_grouped_gemm_persistent_kernel
+        default_kwargs = {}
     
     # TODO: torch.compile doesn't like passing in function    
     epilogue = params.activation
 
-    post_act_n, preact_for_grad_n = act_n(params.activation, block_n)
            
     grid = lambda META: (META["NUM_PROGRAMS"],)
 
@@ -509,7 +496,6 @@ def m_grouped_gemm(
         NUM_EXPERTS=e, 
         K=k,
         N=n,
-        POST_ACT_BLOCK_N=post_act_n,
         TOPK=params.topk,
         GATHER_ROWS=params.gather,
         SCATTER_ROWS=params.scatter,
@@ -522,7 +508,5 @@ def m_grouped_gemm(
         GRAD_ACT=(params.pre_act_for_grad is not None) and "grad" in params.activation,
         **default_kwargs
     )
-    
-    print(a.requires_grad, out.requires_grad)
     
     return MGroupedGEMMOutput(output=out, preactivation=preactivation)

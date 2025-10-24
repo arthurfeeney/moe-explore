@@ -9,12 +9,6 @@ from moe_explore.functional.m_grouped_mlp import m_grouped_mlp
 from moe_explore.expert_permute import expert_input_permute, expert_output_permute
 from typing import Optional
 
-#@torch.compile(
-#    options={
-#        "shape_padding": True
-#    },
-#    fullgraph=True
-#)
 def topk_moe(
     input: torch.Tensor,
     params: MOEParams,
@@ -40,7 +34,6 @@ def topk_moe(
     else:
         return down
 
-@torch.compile
 def topk_moe_torch(
     input,
     params: MOEParams,

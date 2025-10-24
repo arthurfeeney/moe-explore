@@ -38,7 +38,9 @@ def fast_autotune_configs(persistent: bool):
     block_k = AutotuneParam("BLOCK_K", [32, 64])
     num_warps = AutotuneParam("num_warps", [4, 8])
     num_stages = AutotuneParam("num_stages", [4])
-    params = [block_m, block_n, block_k, num_warps, num_stages]
+    epilogue_split = AutotuneParam("EPILOGUE_SPLIT", [1, 2])
+    group_sizes = AutotuneParam("CACHE_GROUP_M", [0, 4, 6])
+    params = [block_m, block_n, block_k, num_warps, num_stages, epilogue_split, group_sizes]
     if persistent:
         params.append(AutotuneParam("NUM_PROGRAMS", [get_gpu_sm_count()]))
     return generate_configs(params)
@@ -52,9 +54,7 @@ def max_autotune_configs(persistent: bool):
     num_warps = AutotuneParam("num_warps", [4, 8])
     num_stages = AutotuneParam("num_stages", [3, 4, 5, 6])
     epilogue_split = AutotuneParam("EPILOGUE_SPLIT", [1, 2])
-    disallow_acc_multi_buffer = AutotuneParam("DISALLOW_ACC_MULTI_BUFFER", [False])
-    use_tensor_descriptor = AutotuneParam("USE_TENSOR_DESCRIPTOR", [False])
-    params = [block_m, block_n, block_k, num_warps, num_stages, group_sizes, epilogue_split, disallow_acc_multi_buffer, use_tensor_descriptor]
+    params = [block_m, block_n, block_k, num_warps, num_stages, group_sizes, epilogue_split]
     if persistent:
         sm_count = get_gpu_sm_count()
         num_programs = [sm_count]

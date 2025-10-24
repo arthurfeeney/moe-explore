@@ -24,7 +24,7 @@ def get_token_indices(
     zero_prefix=False
 ):
     flat_expert_indices = expert_indices.view(-1)
-    indices = flat_expert_indices.argsort().to(torch.int32)#(stable=True)
+    indices = flat_expert_indices.argsort().to(torch.int32)
     counts = torch.zeros(num_experts, dtype=torch.int32, device=expert_indices.device)
     torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts, out=counts)
 
@@ -48,7 +48,8 @@ def expert_input_permute(
     topk: int
 ) -> GroupedTokens:
     indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=True)
-    output = row_gather(tokens, indices.indices // topk)
+    output = tokens[indices.indices // topk]
+    #output = row_gather(tokens, indices.indices // topk)
     return GroupedTokens(
         tokens=output,
         group_indices=indices.group_indices,
@@ -63,6 +64,8 @@ def expert_output_permute(
     output_shape: Union[Tuple[int], torch.Size]
 ) -> torch.Tensor:
     with proton.scope("scatter"):
-        tokens = row_scatter(grouped_tokens.tokens, grouped_tokens.indices)
+        tokens = torch.empty_like(grouped_tokens.tokens)
+        tokens[grouped_tokens.indices] = grouped_tokens.tokens
+        #tokens = row_scatter(grouped_tokens.tokens, grouped_tokens.indices)
     with proton.scope("scale-and-reduce"):
         return scale_and_reduce(tokens, expert_scores, expert_scores.size(0), topk, tokens.size(1))

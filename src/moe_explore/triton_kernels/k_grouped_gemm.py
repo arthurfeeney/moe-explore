@@ -59,7 +59,6 @@ def k_grouped_gemm_inner_kernel(
     BLOCK_K: tl.constexpr,
     CACHE_GROUP_M: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
-    DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
 ):
     num_m_tiles = tl.cdiv(M, BLOCK_M)
     num_n_tiles = tl.cdiv(N, BLOCK_N)    
@@ -94,10 +93,10 @@ def k_grouped_gemm_inner_kernel(
        
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k_iter in tl.range(0, tl.cdiv(k, BLOCK_K)):
-            if not GATHER_A:
-                tl.multiple_of(a_ptrs, [16, 16])
-            if not GATHER_B:
-                tl.multiple_of(b_ptrs, [16, 16])
+            #if not GATHER_A:
+            #    tl.multiple_of(a_ptrs, [16, 16])
+            #if not GATHER_B:
+            #    tl.multiple_of(b_ptrs, [16, 16])
             
             k_step_offset = start_idx + tl.arange(0, BLOCK_K) + k_iter * BLOCK_K
             k_mask = k_step_offset < end_idx
@@ -106,7 +105,10 @@ def k_grouped_gemm_inner_kernel(
             b_mask = k_mask[:, None] & (tile_n_offsets < N)
         
             if GATHER_A or GATHER_B:
-                gather_indices = tl.load(permute_indices_ptr + k_step_offset)
+                # Ideallly, thsi will be pipeline as well...!
+                gather_indices = tl.load(permute_indices_ptr + k_step_offset,
+                                         mask=k_mask,
+                                         other=0)
                 
             if GATHER_A:
                 a_row_offsets = (gather_indices // TOPK) * a_stride_1
@@ -136,11 +138,9 @@ def k_grouped_gemm_inner_kernel(
         if not USE_OUT_TENSOR_DESCRIPTOR:
             tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
             tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
-            out_m_mask = tile_m_offsets < M
-            # The accumulators are all the same size, but the EPILOGUE may change the 
-            # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
-            out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
-            out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
+            out_m_mask = tile_m_idx + tl.arange(0, BLOCK_M) < M
+            out_tile_n_offsets = tile_n_idx + tl.arange(0, accs[0].shape[1]) #// BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
+            #out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
             out_row_offsets = tile_m_offsets
             out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
             out_ptrs = out_ptr + out_offsets
@@ -150,7 +150,7 @@ def k_grouped_gemm_inner_kernel(
                 epilogue_split_offset = i * out.shape[1]
                 tl.store(
                     out_ptrs + epilogue_split_offset * out_stride_3, 
-                    out, 
+                    out,
                     mask=out_m_mask[:, None] & (epilogue_split_offset + n_offset < N - tile_n_idx))
         else:
             for i in tl.static_range(len(accs)):
@@ -187,7 +187,6 @@ def k_grouped_gemm_persistent_kernel(
     BLOCK_K: tl.constexpr,
     CACHE_GROUP_M: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
-    DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -238,7 +237,6 @@ def k_grouped_gemm_persistent_kernel(
             BLOCK_K,
             CACHE_GROUP_M,
             EPILOGUE_SPLIT,
-            DISALLOW_ACC_MULTI_BUFFER,
         )
         
         last_problem_end += num_tiles
@@ -270,7 +268,6 @@ def k_grouped_gemm_default_config(e, params, dtype):
             "NUM_PROGRAMS": get_gpu_sm_count(),
             "CACHE_GROUP_M": 8,
             "EPILOGUE_SPLIT": 2,
-            "DISALLOW_ACC_MULTI_BUFFER": False,
             "USE_OUT_TENSOR_DESCRIPTOR": False
         },
         num_warps=8, 
@@ -308,20 +305,20 @@ def k_grouped_gemm(
     # only use descriptors when strides, except the last, are 16-byte aligned
     use_out_tensor_descriptor = use_out_tensor_descriptor and all([(s * out.element_size()) % 16 == 0 for s in out.stride()[:-1]])
     # TODO: I'm not sure why it doesn't work with float32...
-    use_out_tensor_descriptor = out.dtype in (torch.float16, torch.bfloat16)
+    use_out_tensor_descriptor = use_out_tensor_descriptor and out.dtype in (torch.float16, torch.bfloat16)
     if use_out_tensor_descriptor:
         # the descriptor needs to account for the potential epilogue splitting.
         block_size = [1, block_m, block_n // default_kwargs["EPILOGUE_SPLIT"]]
         out_desc = TensorDescriptor.from_tensor(out, block_size)
 
     func = k_grouped_gemm_persistent_kernel
-    #if autotune_mode == AutotuneMode.FAST:
-    #    func = _fast_autotune_k_grouped_gemm_persistent_kernel
-    #    default_kwargs = {}
-    #elif autotune_mode == AutotuneMode.MAX:
-    #    func = _max_autotune_k_grouped_gemm_persistent_kernel
-    #    default_kwargs = {}
-            
+    if autotune_mode == AutotuneMode.FAST:
+        func = _fast_autotune_k_grouped_gemm_persistent_kernel
+        default_kwargs = {}
+    elif autotune_mode == AutotuneMode.MAX:
+        func = _max_autotune_k_grouped_gemm_persistent_kernel
+        default_kwargs = {}
+
     grid = lambda META: (META["NUM_PROGRAMS"],)
         
     func[grid](
@@ -340,7 +337,7 @@ def k_grouped_gemm(
         TOPK=params.topk,
         GATHER_A=params.gather_a,
         GATHER_B=params.gather_b,
-        USE_OUT_TENSOR_DESCRIPTOR=use_out_tensor_descriptor,
+        USE_OUT_TENSOR_DESCRIPTOR=False,#use_out_tensor_descriptor,
         **default_kwargs
     )
     

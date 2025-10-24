@@ -49,7 +49,7 @@ def m_grouped_mlp_forward(
     else:
         activated = out1.output
         preactivation = out1.preactivation if return_pre_act else None
-    
+        
     out2 = m_grouped_gemm_forward(
         activated,
         weight2,
