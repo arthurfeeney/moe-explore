@@ -9,13 +9,13 @@ from triton.tools.tensor_descriptor import TensorDescriptor
 from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
 from moe_explore.triton_kernels.tile_util import get_tile_id_in_group, tile_offsets_in_group
-from moe_explore.triton_kernels.activation import activation, act_n
+from moe_explore.triton_kernels.activation import activation
 from .autotune_config import (
     AutotuneMode, 
     fast_autotune_configs, 
     max_autotune_configs
 )
-from .epilogue_split import epilogue_split, store_split_epilogue
+from .epilogue_split import epilogue_split
 
 @dataclass
 class MGroupedGEMMParams:
@@ -244,7 +244,6 @@ def m_grouped_gemm_inner_kernel(
         
         tile_id += NUM_PROGRAMS
     return tile_id
-    
 
 @triton.jit
 def m_grouped_gemm_persistent_kernel(
@@ -383,7 +382,6 @@ def m_grouped_gemm_default_config(e, params, dtype):
             "NUM_PROGRAMS": get_gpu_sm_count(),
             "CACHE_GROUP_M": 0,
             "EPILOGUE_SPLIT": 1,
-            "DISALLOW_ACC_MULTI_BUFFER": False,
             "USE_A_TENSOR_DESCRIPTOR": False,
             "USE_B_TENSOR_DESCRIPTOR": False
         },
@@ -473,7 +471,6 @@ def m_grouped_gemm(
     # TODO: torch.compile doesn't like passing in function    
     epilogue = params.activation
 
-           
     grid = lambda META: (META["NUM_PROGRAMS"],)
 
     func[grid](
