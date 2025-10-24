@@ -44,11 +44,15 @@ def torch_grouped_matmul_gather_scatter(
             c[glo:ghi] = prod
             
     if params.activation is not None:
-        c = activation(c, params.activation)
-            
+        if params.pre_act_for_grad is not None:
+            assert "grad" in params.activation
+            c = activation(params.pre_act_for_grad, params.activation, grad_out=c)
+        else:
+            c = activation(c, params.activation, None)
+             
     if params.scatter and params.scales is not None:
         c = scale_and_reduce(c, params.scales, params.num_tokens, params.topk, b.size(-1))
-            
+                
     return c.to(dtype)
 
 def perfect_routing(num_tokens: int, num_experts: int, topk: int, device: torch.device, dtype: torch.dtype):

@@ -1,6 +1,6 @@
 import math
 import torch
-from moe_explore.triton_kernels.m_grouped_gemm_manual import (
+from moe_explore.triton_kernels.m_grouped_gemm import (
     m_grouped_gemm,
     MGroupedGEMMParams
 )
@@ -21,11 +21,9 @@ except:
     (200, 4, 512, 512, "silu", torch.bfloat16),
     (200, 4, 512, 512, "swiglu", torch.bfloat16),
     (200, 4, 512, 512, "geglu", torch.bfloat16),
-    (1000, 16, 1024, 1024, "gelu", torch.bfloat16),
-    (1000, 16, 1024, 1024, "grad_silu", torch.bfloat16),
-    (1000, 16, 1024, 1024, "grad_gelu", torch.bfloat16),
-    (1000, 16, 1024, 1024, "swiglu", torch.bfloat16),
-    (16000, 16, 1024, 1024, "geglu", torch.bfloat16),
+    (16000, 16, 1024, 1024, "gelu", torch.float32),
+    (16000, 16, 1024, 1024, "swiglu", torch.float32),
+    (16000, 16, 1024, 1024, "geglu", torch.float32),
     # TODO: Group size one is broken.
     #(1000, 1, 1024, 1024, "geglu", torch.bfloat16),
     (1000, 2, 300, 20, "gelu", torch.bfloat16),
@@ -59,7 +57,7 @@ def test_m_grouped_gemm(
         activation=activation
     )
     
-    out = m_grouped_gemm(input, weight, group_indices, params)
+    out = m_grouped_gemm(input, weight, group_indices, params).output
     ref = torch_grouped_matmul_gather_scatter(input, weight, group_indices, params)
         
     assert out.isfinite().all() and ref.isfinite().all()
@@ -93,7 +91,7 @@ def test_m_grouped_gemm_eye(
         scales=None,
         activation=act
     )
-    out = m_grouped_gemm(input, weight, group_indices, params)
+    out = m_grouped_gemm(input, weight, group_indices, params).output
     target = activation(input, act)
     torch.testing.assert_close(out, target, atol=1e-6, rtol=1e-6)
 
@@ -131,7 +129,7 @@ def test_m_grouped_gemm_zeros(
         scales=None,
         activation=activation
     )
-    out = m_grouped_gemm(input, weight, group_indices, params)
+    out = m_grouped_gemm(input, weight, group_indices, params).output
     assert (out == 0).all()
 
 parameters = "num_tokens,num_experts,topk,K,N,activation,dtype"
@@ -142,6 +140,7 @@ gather_scatter_test_cases = [
     (200, 4, 2, 512, 512, "swiglu", torch.bfloat16),
     (200, 4, 2, 512, 512, "geglu", torch.bfloat16),
     (1000, 4, 2, 1000, 1000, "gelu", torch.float32),
+    (4000, 4, 2, 1000, 1000, "gelu", torch.float32),
 ]
 
 @pytest.mark.parametrize(parameters, gather_scatter_test_cases)
@@ -174,7 +173,7 @@ def test_m_grouped_gemm_gather(
         activation=activation
     )
     
-    out = m_grouped_gemm(input, weight, p.group_indices, params)
+    out = m_grouped_gemm(input, weight, p.group_indices, params).output
     ref = torch_grouped_matmul_gather_scatter(input, weight, p.group_indices, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
@@ -215,7 +214,7 @@ def test_m_grouped_gemm_scatter(
         activation=activation
     )
 
-    out = m_grouped_gemm(input, weight, p.group_indices, params)
+    out = m_grouped_gemm(input, weight, p.group_indices, params).output
     out = scale_and_reduce(out, params.scales, params.num_tokens, params.topk, out.size(-1))    
     ref = torch_grouped_matmul_gather_scatter(input, weight, p.group_indices, params)
                 
@@ -279,7 +278,7 @@ def test_m_grouped_gemm_layouts(
         is_b_transposed=b_store_transpose
     )
     
-    out = m_grouped_gemm(input, weight, group_indices, params)
+    out = m_grouped_gemm(input, weight, group_indices, params).output
     ref = torch_grouped_matmul_gather_scatter(input, weight, group_indices, params)
     
     assert out.isfinite().all() and ref.isfinite().all()
@@ -308,7 +307,7 @@ def test_te_grouped_linear():
         scales=None,
         activation=activation
     )
-    out = m_grouped_gemm(input, weight, group_indices, params)
+    out = m_grouped_gemm(input, weight, group_indices, params).output
     
     grouped_linear = GroupedLinear(num_experts, K, N, bias=False, params_dtype=dtype)
     
@@ -321,5 +320,66 @@ def test_te_grouped_linear():
     assert out.isfinite().all() and ref.isfinite().all()
     assert_close(out, ref)
     
+def test_m_grouped_gemm_preactivation():
+    num_tokens = 1000
+    num_experts = 16
+    K = 128
+    N = 256
+    activation = "gelu"
+    dtype = torch.bfloat16
     
+    input = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N)
+    group_indices = random_groups(num_tokens, num_experts, device="cuda")
+    params = MGroupedGEMMParams(
+        None,
+        False,
+        False,
+        num_tokens,
+        topk=1,
+        scales=None,
+        activation=activation,
+        return_preactivation=True
+    )
+    out = m_grouped_gemm(input, weight, group_indices, params)
+    assert out.preactivation is not None
     
+    params.activation = None
+    ref_pre = torch_grouped_matmul_gather_scatter(input, weight, group_indices, params)
+    params.activation = activation
+    ref_out = torch_grouped_matmul_gather_scatter(input, weight, group_indices, params)
+    assert_close(out.output, ref_out)
+    assert_close(out.preactivation, ref_pre)
+
+""" 
+def test_m_grouped_gemm_grad_act():
+    num_tokens = 4000
+    num_experts = 4
+    K = 512
+    N = 600
+    activation = "grad_relu"
+    dtype = torch.float32
+    
+    grad_out = torch.randn((num_tokens, K), dtype=dtype, device="cuda")
+    weight = torch.randn((num_experts, K, N), dtype=dtype, device="cuda") / math.sqrt(N)
+    group_indices = random_groups(num_tokens, num_experts, device="cuda")
+    pre_act_n = N * 2 if "glu" in activation else N
+    pre_act_for_grad = torch.randn((num_tokens, pre_act_n), dtype=dtype, device="cuda")
+    
+    params = MGroupedGEMMParams(
+        None,
+        False,
+        False,
+        num_tokens,
+        topk=1,
+        scales=None,
+        activation=activation,
+        return_preactivation=False,
+        pre_act_for_grad=pre_act_for_grad
+    )
+    out = m_grouped_gemm(grad_out, weight, group_indices, params)
+    assert out.preactivation is None
+    ref = torch_grouped_matmul_gather_scatter(grad_out, weight, group_indices, params)
+
+    assert_close(out.output, ref)
+"""

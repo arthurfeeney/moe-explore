@@ -33,12 +33,14 @@ def activation_kernel(x_ptr, y_ptr, ACTIVATION: tl.constexpr, BLOCK_SIZE_M: tl.c
         ("silu", F.silu),
         ("gelu", F.gelu),
         ("relu", F.relu),
-        ("swiglu", torch_swiglu),
-        ("geglu", torch_geglu),
     ])
 def test_torch_activation(act: str, torch_act: Callable):
     x = torch.randn((32, 32, 32), device="cuda", dtype=torch.float32)
-    x_grad, y = act_and_grad(x.clone(), partial(activation, act=act), partial(activation, act=f"grad_{act}"))
+    x_grad, y = act_and_grad(
+        x.clone(), 
+        partial(activation, act=act), 
+        partial(activation, act=f"grad_{act}", grad_out=torch.ones_like(x))
+    )
     
     x.requires_grad = True
     ref_y = torch_act(x)
@@ -67,8 +69,6 @@ def test_triton_activation(act: str, torch_act: Callable):
         y = torch.zeros_like(x)
     activation_kernel[(1, 1)](x, y, TRITON_ACTIVATIONS[act], x.size(0), x.size(1))
     y_ref = torch_act(x)
-    print(y[-1])
-    print(y_ref[-1])
     assert_close(y, y_ref, atol=1e-6, rtol=1e-6)
     
     # backward

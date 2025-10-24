@@ -21,10 +21,14 @@ def m_grouped_mlp_forward(
     assert group_indices.size(0) == weight2.size(0) + 1
     assert num_tokens > 0 and topk > 0
     
-    # always fuse the activation during inference
-    fused_act = not (torch.is_grad_enabled() and tokens.requires_grad)
-
-    pre_activation = m_grouped_gemm_forward(
+    # always fuse the activation during inference.
+    # If fusing during training, we must return the preactivation.
+    in_train = weight1.requires_grad
+    fused_act = True
+    # If activation is a relu, it's gradient can be computed from the grad output.
+    return_pre_act = in_train and activation != "relu"
+    
+    out1 = m_grouped_gemm_forward(
         tokens,
         weight1,
         group_indices,
@@ -33,16 +37,21 @@ def m_grouped_mlp_forward(
         scatter=False,
         num_tokens=num_tokens,
         topk=topk,
-        activation=activation if fused_act else None
+        activation=activation if fused_act else None,
+        return_preactivation=return_pre_act and fused_act
     )
-
-    if activation is not None and not fused_act:
-        intermediate = activation_func(pre_activation, activation)
-    else:
-        intermediate = pre_activation
     
-    output = m_grouped_gemm_forward(
-        intermediate,
+    # If we did not fuse the activation, gemm.output is the pre-activation.
+    # If we're training, need to save the pre-activation
+    if activation is not None and not fused_act:
+        activated = activation_func(out1.output, activation)
+        preactivation = out1.output if return_pre_act else None
+    else:
+        activated = out1.output
+        preactivation = out1.preactivation if return_pre_act else None
+    
+    out2 = m_grouped_gemm_forward(
+        activated,
         weight2,
         group_indices,
         permute_indices=permute_indices,
@@ -53,13 +62,13 @@ def m_grouped_mlp_forward(
         activation=None
     )
 
-    # The intermediate state is returned for the backward pass.
-    return output, pre_activation
+    return out2.output, activated, preactivation
 
 def m_grouped_mlp_backward(
     grad_output: torch.Tensor,
     tokens: torch.Tensor,
     intermediate: torch.Tensor,
+    pre_activation: torch.Tensor,
     weight1: torch.Tensor,
     weight2: torch.Tensor,
     group_indices: torch.Tensor,
@@ -75,9 +84,11 @@ def m_grouped_mlp_backward(
     assert group_indices.size(0) == weight2.size(0) + 1
     assert num_tokens > 0 and topk > 0
     
+    grad_activation: Optional[str] = "grad_" + activation if activation is not None else None
     grad_intermediate, grad_weight2 = m_grouped_gemm_backward(
         grad_output,
-        activation_func(intermediate, activation),
+        intermediate,
+        None,
         weight2,
         group_indices,
         permute_indices,
@@ -88,19 +99,18 @@ def m_grouped_mlp_backward(
         activation=None
     )
 
-    # TODO: how to fuse this???
-    # Gradient of relu can be computed from the output.
-    # Gradient of stuff like silu uses the INPUT.
-    # In the forward pass, Intermediate did NOT have the activation applied.
+    # Maybe better to fuse with the next gemm
     if activation is not None:
-        grad_activation: Optional[str] = "grad_" + activation if activation is not None else None
-        if "glu" in activation:
-            grad_intermediate = grad_intermediate.repeat_interleave(2, dim=-1)
-        grad_intermediate = grad_intermediate * activation_func(intermediate, grad_activation)
+        # ReLU doesn't need to store pre_activation.
+        if grad_activation == "grad_relu":
+            grad_intermediate = activation_func(intermediate, grad_activation, grad_intermediate)
+        else:
+            grad_intermediate = activation_func(pre_activation, grad_activation, grad_intermediate)
 
     grad_tokens, grad_weight1 = m_grouped_gemm_backward(
         grad_intermediate,
         tokens,
+        None,
         weight1,
         group_indices,
         permute_indices,
@@ -116,20 +126,21 @@ def m_grouped_mlp_backward(
 class MGroupedMLP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tokens, weight1, weight2, group_indices, permute_indices, num_tokens, topk, activation):
-        output, intermediate = m_grouped_mlp_forward(
+        output, intermediate, preactivation = m_grouped_mlp_forward(
             tokens, weight1, weight2, group_indices, permute_indices, num_tokens, topk, activation)
-        ctx.save_for_backward(tokens, intermediate, weight1, weight2, group_indices, permute_indices)
+        ctx.save_for_backward(tokens, intermediate, preactivation, weight1, weight2, group_indices, permute_indices)
         ctx.num_tokens, ctx.topk, ctx.activation = num_tokens, topk, activation
         return output
     
     @staticmethod
     def backward(ctx, grad_output):
-        tokens, intermediate, weight1, weight2, group_indices, permute_indices = ctx.saved_tensors
+        tokens, intermediate, pre_activation, weight1, weight2, group_indices, permute_indices = ctx.saved_tensors
         return (
             *m_grouped_mlp_backward(
                 grad_output, 
                 tokens, 
                 intermediate, 
+                pre_activation,
                 weight1, 
                 weight2, 
                 group_indices, 

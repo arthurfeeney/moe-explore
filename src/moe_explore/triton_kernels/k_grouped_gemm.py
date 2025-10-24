@@ -6,7 +6,7 @@ import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
-from .activation import TRITON_ACTIVATIONS
+from .activation import TRITON_ACTIVATIONS, activation
 from .autotune_config import (
     AutotuneMode,
     fast_autotune_configs, 
@@ -58,7 +58,6 @@ def k_grouped_gemm_inner_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     CACHE_GROUP_M: tl.constexpr,
-    EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
 ):
@@ -132,7 +131,7 @@ def k_grouped_gemm_inner_kernel(
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
-        accs = epilogue_split(acc, EPILOGUE_SPLIT, EPILOGUE, BLOCK_M, BLOCK_N)
+        accs = epilogue_split(acc, EPILOGUE_SPLIT, BLOCK_M, BLOCK_N)
 
         if not USE_OUT_TENSOR_DESCRIPTOR:
             tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
@@ -142,12 +141,17 @@ def k_grouped_gemm_inner_kernel(
             # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
             out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
             out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
-
             out_row_offsets = tile_m_offsets
             out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
             out_ptrs = out_ptr + out_offsets
-
-            store_split_epilogue(out_ptrs, out_stride_3, out_m_mask, N - tile_n_idx, accs)
+            for i in tl.static_range(len(accs)):
+                out = accs[i]
+                n_offset = tl.arange(0, out.shape[1])
+                epilogue_split_offset = i * out.shape[1]
+                tl.store(
+                    out_ptrs + epilogue_split_offset * out_stride_3, 
+                    out, 
+                    mask=out_m_mask[:, None] & (epilogue_split_offset + n_offset < N - tile_n_idx))
         else:
             for i in tl.static_range(len(accs)):
                 # need to explicitly cast `out` dtype to match the descriptor dtype
@@ -182,7 +186,6 @@ def k_grouped_gemm_persistent_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     CACHE_GROUP_M: tl.constexpr,
-    EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
 ):
@@ -234,12 +237,10 @@ def k_grouped_gemm_persistent_kernel(
             BLOCK_N,
             BLOCK_K,
             CACHE_GROUP_M,
-            EPILOGUE,
             EPILOGUE_SPLIT,
             DISALLOW_ACC_MULTI_BUFFER,
         )
         
-        start_idx = end_idx
         last_problem_end += num_tiles
 
 _fast_autotune_k_grouped_gemm_persistent_kernel = triton.autotune(
@@ -270,7 +271,7 @@ def k_grouped_gemm_default_config(e, params, dtype):
             "CACHE_GROUP_M": 8,
             "EPILOGUE_SPLIT": 2,
             "DISALLOW_ACC_MULTI_BUFFER": False,
-            "USE_OUT_TENSOR_DESCRIPTOR": True
+            "USE_OUT_TENSOR_DESCRIPTOR": False
         },
         num_warps=8, 
         num_stages=num_stages
@@ -306,7 +307,7 @@ def k_grouped_gemm(
     del default_kwargs["USE_OUT_TENSOR_DESCRIPTOR"]
     # only use descriptors when strides, except the last, are 16-byte aligned
     use_out_tensor_descriptor = use_out_tensor_descriptor and all([(s * out.element_size()) % 16 == 0 for s in out.stride()[:-1]])
-    # I'm not sure why it doesn't work with float32...
+    # TODO: I'm not sure why it doesn't work with float32...
     use_out_tensor_descriptor = out.dtype in (torch.float16, torch.bfloat16)
     if use_out_tensor_descriptor:
         # the descriptor needs to account for the potential epilogue splitting.
@@ -320,9 +321,7 @@ def k_grouped_gemm(
     #elif autotune_mode == AutotuneMode.MAX:
     #    func = _max_autotune_k_grouped_gemm_persistent_kernel
     #    default_kwargs = {}
-
-    epilogue = TRITON_ACTIVATIONS[params.activation] if params.activation in TRITON_ACTIVATIONS else None
-        
+            
     grid = lambda META: (META["NUM_PROGRAMS"],)
         
     func[grid](
@@ -342,17 +341,7 @@ def k_grouped_gemm(
         GATHER_A=params.gather_a,
         GATHER_B=params.gather_b,
         USE_OUT_TENSOR_DESCRIPTOR=use_out_tensor_descriptor,
-        EPILOGUE=epilogue,
         **default_kwargs
     )
     
     return out
-
-def torch_k_grouped_gemm(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    group_indices: torch.Tensor,
-    params: KGroupedGEMMParams,
-    autotune_mode: Optional[AutotuneMode] = None
-):
-    pass

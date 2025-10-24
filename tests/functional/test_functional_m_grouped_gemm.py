@@ -1,3 +1,4 @@
+from torch._dynamo import output_graph
 from moe_explore.functional.m_grouped_gemm import m_grouped_gemm, torch_grouped_gemm
 from moe_explore.testing import random_groups, random_routing,assert_close
 from moe_explore.expert_permute import get_token_indices
@@ -8,7 +9,6 @@ import pytest
 
 test_string = "num_tokens,num_experts,topk,activation,dtype"
 test_params = [
-    # TODO: The backward pass doesn't apply the grad_actiation yet.
     (1000, 16, 4, None, torch.bfloat16),
     (1000, 16, 4, None, torch.float16),
     (1000, 32, 8, None, torch.bfloat16),
@@ -74,7 +74,7 @@ def test_m_grouped_gemm_gather(
     weight.requires_grad = True
     
     output = m_grouped_gemm(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
-    output.mean().backward()
+    output.sum().backward()
     actual_weight_grad = weight.grad.data.clone()
     actual_tokens_grad = tokens.grad.data.clone()
 
@@ -82,7 +82,7 @@ def test_m_grouped_gemm_gather(
     tokens.grad.data.zero_()
     
     ref = torch_grouped_gemm(tokens, weight, p.group_indices, p.indices, gather, scatter, num_tokens, topk, activation)
-    ref.mean().backward()
+    ref.sum().backward()
     ref_weight_grad = weight.grad.data.clone()
     ref_tokens_grad = tokens.grad.data.clone()
     

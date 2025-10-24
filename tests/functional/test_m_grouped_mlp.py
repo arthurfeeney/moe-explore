@@ -60,11 +60,7 @@ def test_m_grouped_mlp(
     ref_weight2_grad = weight2.grad.data.clone()
     ref_tokens_grad = tokens.grad.data.clone()
     
-    print(actual_weight2_grad[:, 1])
-    print(ref_weight2_grad[:, 1])
-    
     assert_close(output, ref)
-    
     assert_close(actual_weight2_grad, ref_weight2_grad)
     # NOTE: These use pretty large tolerances because there's a lot of operations leading into this.
     # When using silu, only ~1% of elements are off by this much. With relu it's more accurate.

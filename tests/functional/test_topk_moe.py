@@ -12,34 +12,41 @@ from moe_explore.params import MOEParams
 from moe_explore.testing import random_mlp, random_topk_router, assert_close, random_interleaved_glu
 from moe_explore.baseline.huggingface import make_huggingface_moe, set_huggingface_moe_weights
 from moe_explore.baseline.torch_grouped_mm import TorchGroupedMMMoE
+from moe_explore.gpu_utils import get_gpu_sm_version
 #from moe_explore.baseline.transformer_engine import TransformerEngineMoE
 
 test_params = [
     # This test runs the full forward and backward pass. With low precision and
     # larger weights, the errors accumulate by the time we're in the last part
     # of the backward pass. So, for lower precision, we only test smaller weights.
-    (128, 128, 128, "relu", 8, 2, torch.float16),
+    (128, 512, 512, "relu", 8, 2, torch.float16),
     (128, 128, 128, "silu", 8, 2, torch.float16),
-    (128, 128, 128, "relu", 8, 2, torch.float16),
+    (128, 512, 512, "relu", 8, 2, torch.float16),
     (128, 128, 128, "silu", 8, 2, torch.float16),
     (128, 128, 128, "gelu", 8, 2, torch.float16),
     (128, 128, 128, "swiglu", 8, 2, torch.float16),
     (128, 128, 128, "geglu", 8, 2, torch.float16),
     (128, 512, 512, "relu", 8, 2, torch.float16),
     # Run lots of tests in float32 since floating point errors don't accumulate as much.
+    # Also checks lots of sizes that require masking.
     (999, 1024, 1024, "relu", 8, 2, torch.float32),
-    #(999, 1024, 1024, "silu", 8, 2, torch.float32),
-    #(1024, 1024, 1001, "gelu", 8, 2, torch.float32),
-    #(999, 1024, 1024, "swiglu", 8, 2, torch.float32),
-    #(999, 1000, 1000, "geglu", 8, 2, torch.float32),
-    #(999, 1000, 1000, "relu", 64, 8, torch.float32),
-    #(999, 1000, 1000, "silu", 64, 8, torch.float32),
-    #(999, 1000, 1000, "gelu", 64, 8, torch.float32),
-    #(999, 1000, 1000, "swiglu", 64, 8, torch.float32),
-    #(999, 1000, 1000, "geglu", 64, 8, torch.float32),
-    # Some sizes that require masking.
-    #(1, 1000, 1000, "geglu", 64, 8, torch.float32),
-    #(1, 30, 30, "geglu", 64, 8, torch.float32),
+    (999, 1024, 1024, "silu", 8, 2, torch.float32),
+    (1024, 1024, 1001, "gelu", 8, 2, torch.float32),
+    (999, 1024, 1024, "swiglu", 8, 2, torch.float32),
+    (999, 1000, 1000, "geglu", 8, 2, torch.float32),
+    (999, 1000, 1000, "relu", 64, 8, torch.float32),
+    (999, 1000, 1000, "silu", 64, 8, torch.float32),
+    (999, 1000, 1000, "gelu", 64, 8, torch.float32),
+    (999, 1000, 1000, "swiglu", 64, 8, torch.float32),
+    (999, 1000, 1000, "geglu", 64, 8, torch.float32),
+    (1, 1000, 1000, "geglu", 64, 8, torch.float32),
+    (1, 30, 30, "geglu", 64, 8, torch.float32),
+    (1, 1000, 1000, "geglu", 1, 1, torch.float32),
+    (1, 30, 30, "geglu", 2, 1, torch.float32),
+    (4000, 1000, 1000, "geglu", 1, 1, torch.float32),
+    (4000, 1000, 1000, "geglu", 2, 1, torch.float32),
+    (4000, 30, 30, "geglu", 4, 2, torch.float32),
+    (4000, 1000, 1000, "geglu", 4, 2, torch.float32),
 ]
 
 @pytest.mark.parametrize(
@@ -143,8 +150,8 @@ def test_hf_moe():
         topk
     )
     
-    mlp_params.weight1.data[:] = torch.ones_like(mlp_params.weight1)
-    mlp_params.weight2.data[:] = torch.ones_like(mlp_params.weight2)
+    mlp_params.weight1
+    mlp_params.weight2
     
     input = torch.randn((seq_len, input_dim), device="cuda", dtype=dtype)
     
@@ -160,6 +167,9 @@ def test_hf_moe():
     assert_close(output, hf_hidden_states.squeeze(0)) 
     
 def test_torch_moe():
+    # _grouped_mm is hopper+
+    if get_gpu_sm_version() < 90:
+        return
     num_experts = 16
     seq_len = 128
     input_dim = 128
@@ -203,6 +213,8 @@ def test_torch_moe():
     
     moe = TorchGroupedMMMoE(input_dim, hidden_dim, num_experts, topk, activation, dtype).to("cuda").to(dtype)
     moe.init_weights(moe_params.expert_params.weight1, moe_params.expert_params.weight2)
+    moe.weight1.requires_grad = True
+    moe.weight2.requires_grad = True
     ref = moe(input, lambda x: router(x, router_params))
     ref.sum().backward()
     

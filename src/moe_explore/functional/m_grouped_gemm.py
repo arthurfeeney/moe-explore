@@ -13,7 +13,8 @@ def m_grouped_gemm_forward(
     scatter: bool,
     num_tokens: int,
     topk: int,
-    activation: Optional[str] = None
+    activation: Optional[str] = None,
+    return_preactivation: bool = False
 ):
     assert tokens.dim() == 2
     assert weight.dim() == 3
@@ -29,13 +30,15 @@ def m_grouped_gemm_forward(
         topk=topk,
         activation=activation,
         is_a_transposed=False,
-        is_b_transposed=False
+        is_b_transposed=False,
+        return_preactivation=return_preactivation
     )
     return triton_m_grouped_gemm(tokens, weight, group_indices, params)
 
 def m_grouped_gemm_backward(
     grad_output: torch.Tensor,
     tokens: torch.Tensor,
+    preactivation: Optional[torch.Tensor],
     weight: torch.Tensor,
     group_indices: torch.Tensor,
     permute_indices: torch.Tensor,
@@ -44,7 +47,7 @@ def m_grouped_gemm_backward(
     forward_scatter: bool,
     num_tokens: int,
     topk: int,
-    activation: Optional[str]
+    activation: Optional[str],
 ):
     r"""
     output = tokens * weight. This computes:
@@ -52,7 +55,7 @@ def m_grouped_gemm_backward(
         (2) grad_weight = tokens^T * grad_output
     The main difficulty for (2) is that both tokens and grad_output are grouped
     for the grad_weight calculation. So it currently cannot reuse the m_grouped_gemm kernel.
-    """    
+    """
     grad_token_params = MGroupedGEMMParams(
         # TODO: This * topk is used because inside the kernel the gather // topk...
         # Since the grad_output is the otuput of grad(scale_and_reduce), we do not want
@@ -64,29 +67,20 @@ def m_grouped_gemm_backward(
         topk=topk,
         activation=None,
         is_a_transposed=False,
-        is_b_transposed=True
+        is_b_transposed=True,
+        pre_act_for_grad=None,
     )
     grad_tokens = triton_m_grouped_gemm(
         grad_output, 
         weight,
         group_indices, 
-        grad_token_params)
+        grad_token_params
+    ).output
     
     if forward_gather:
         # The scatter is fused, but we need to reduce across the top-k entries.
         grad_tokens = grad_tokens.view(-1, topk, tokens.size(-1)).sum(dim=1)
-    
-    # reorder data into groups.
-    # TODO: these are tricky to fuse with k_grouped_gemm
-    #if forward_gather:
-    #    tokens_gather = tokens[permute_indices // topk]
-    #else:
-    #    tokens_gather = tokens
-    #if forward_scatter:
-    #    grad_output_gather = grad_output[permute_indices]
-    #else:
-    #    grad_output_gather = grad_output
-        
+
     grad_weight_params = KGroupedGEMMParams(
         permute_indices=permute_indices,
         gather_a=forward_gather,
@@ -102,17 +96,19 @@ def m_grouped_gemm_backward(
 class MGroupedGEMM(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tokens, weight, group_indices, permute_indices, gather, scatter, num_tokens, topk, activation):
-        ctx.save_for_backward(tokens, weight, group_indices, permute_indices)
         ctx.gather, ctx.scatter, ctx.num_tokens, ctx.topk, ctx.activation = gather, scatter, num_tokens, topk, activation
-        return m_grouped_gemm_forward(tokens, weight, group_indices, permute_indices, gather, scatter, num_tokens, topk, activation)
+        output = m_grouped_gemm_forward(tokens, weight, group_indices, permute_indices, gather, scatter, num_tokens, topk, activation)
+        ctx.save_for_backward(tokens, output.preactivation, weight, group_indices, permute_indices)
+        return output.output
     
     @staticmethod
     def backward(ctx, grad_output):
-        tokens, weight, group_indices, permute_indices = ctx.saved_tensors
+        tokens, preactivated, weight, group_indices, permute_indices = ctx.saved_tensors
         return (
             *m_grouped_gemm_backward(
                 grad_output, 
                 tokens, 
+                preactivated,
                 weight, 
                 group_indices, 
                 permute_indices, 

@@ -23,7 +23,7 @@ def grad_relu(x: torch.Tensor):
     out[x > 0] = 1.0
     out[x <= 0] = 0.0
     return out
-    
+
 @torch.compile
 def grad_silu(x: torch.Tensor):
     sig_x = torch.sigmoid(x)
@@ -61,7 +61,11 @@ def grad_geglu(pre_activated: torch.Tensor):
     up = pre_activated[..., 1::2]
     return torch.stack([grad_gelu(gate) * up, torch.nn.functional.gelu(gate)], dim=-1).view(pre_activated.shape)
     
-def activation(x: torch.Tensor, act: Optional[Activation] = None):
+def activation(
+    x: torch.Tensor, 
+    act: Optional[Activation] = None,
+    grad_out: Optional[torch.Tensor] = None
+):
     if act is None or act == Activation.NONE:
         return x
     if act == Activation.RELU:
@@ -75,13 +79,13 @@ def activation(x: torch.Tensor, act: Optional[Activation] = None):
     elif act == Activation.GEGLU:
         return geglu(x)
     elif act == Activation.GRAD_RELU:
-        return grad_relu(x)
+        return grad_relu(x) * grad_out
     elif act == Activation.GRAD_SILU:
-        return grad_silu(x)
+        return grad_silu(x) * grad_out
     elif act == Activation.GRAD_GELU:
-        return grad_gelu(x)
+        return grad_gelu(x) * grad_out
     elif act == Activation.GRAD_SWIGLU:
-        return grad_swiglu(x)
+        return grad_swiglu(x) * grad_out.repeat_interleave(2, dim=-1)
     elif act == Activation.GRAD_GEGLU:
-        return grad_geglu(x)
+        return grad_geglu(x) * grad_out.repeat_interleave(2, dim=-1)
     assert_never(act)

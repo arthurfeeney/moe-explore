@@ -3,11 +3,13 @@ from functools import partial
 import torch
 import triton
 import triton.language as tl
+import triton.profiler as proton
+import triton.profiler.language as pl
 from triton.tools.tensor_descriptor import TensorDescriptor
 from typing import Optional, Callable
 from moe_explore.gpu_utils import get_gpu_sm_count
 from moe_explore.triton_kernels.tile_util import get_tile_id_in_group, tile_offsets_in_group
-from .activation import TRITON_ACTIVATIONS
+from moe_explore.triton_kernels.activation import activation, act_n
 from .autotune_config import (
     AutotuneMode, 
     fast_autotune_configs, 
@@ -31,15 +33,25 @@ class MGroupedGEMMParams:
     # If we just take a view, like tensor.t(), the strides will account for it, so no flag is needed.
     is_a_transposed: bool = False
     is_b_transposed: bool = False
+    return_preactivation: bool = False
     shared_b: Optional[torch.Tensor] = None
     scales: Optional[torch.Tensor] = None
     activation: Optional[Callable] = None
+    # This is the pre-activation from a forward pass. It's
+    # used to compute the fused activation in a backward pass.
+    pre_act_for_grad: Optional[torch.Tensor] = None
+
+@dataclass
+class MGroupedGEMMOutput:
+    output: torch.Tensor
+    preactivation: Optional[torch.Tensor] = None
 
 @triton.jit
 def m_grouped_gemm_inner_kernel(
     # Tile ids
     problem_id,
     tile_id,
+    end_tile_id,
     start_idx,
     end_idx,
     last_problem_end,
@@ -50,14 +62,19 @@ def m_grouped_gemm_inner_kernel(
     b_stride_1, b_stride_2, b_stride_3,
     out_ptr,
     out_stride_1, out_stride_2,
-    group_indices_ptr,
+    preactivation_ptr,
+    preactivation_stride_1, preactivation_stride_2,
+    preact_for_grad_ptr,
+    preact_for_grad_stride_1, preact_for_grad_stride_2,
     permute_indices_ptr,
     m,
     K: tl.constexpr,
     N: tl.constexpr,
+    POST_ACT_BLOCK_N: tl.constexpr,
     TOPK: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
+    RETURN_PREACTIVATION: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
     USE_A_TENSOR_DESCRIPTOR: tl.constexpr,
@@ -70,14 +87,8 @@ def m_grouped_gemm_inner_kernel(
     CACHE_GROUP_M: tl.constexpr,
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
-    DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
-):          
-    num_m_tiles = tl.cdiv(m, BLOCK_M)
-    num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)    
-    num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
-    tl.assume(num_tiles >= 0)
-    end_tile_id = last_problem_end + num_tiles
-    tl.assume(end_tile_id >= tile_id)
+    GRAD_ACT: tl.constexpr
+):  
     
     if USE_A_TENSOR_DESCRIPTOR:
         a_desc = tl.make_tensor_descriptor(
@@ -125,7 +136,7 @@ def m_grouped_gemm_inner_kernel(
             b_ptrs = b_ptr + b_problem_offset + b_row_offsets[:, None] + b_col_offsets
 
         n_mask = tile_n_offsets < N
-        token_mask = start_idx + tile_m_offsets < end_idx
+        token_mask = start_idx + tile_m_idx + tl.arange(0, BLOCK_M) < end_idx
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
@@ -180,35 +191,62 @@ def m_grouped_gemm_inner_kernel(
                 else:
                     b_ptrs += BLOCK_K * b_stride_2
 
-        accs = epilogue_split(acc, EPILOGUE_SPLIT, EPILOGUE, BLOCK_M, BLOCK_N)
-
+        accs = epilogue_split(acc, EPILOGUE_SPLIT, BLOCK_M, BLOCK_N)
+        
         tile_id_in_gemm = tile_id - last_problem_end
         tile_m_idx, tile_n_idx = get_tile_id_in_group(
             tile_id_in_gemm, m, N, BLOCK_M, BLOCK_N, CACHE_GROUP_M)
         tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
-        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % m, BLOCK_M), BLOCK_M)
-        
+        tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets, BLOCK_M), BLOCK_M)
         a_mask = start_idx + tile_m_offsets < end_idx
-        # The accumulators are all the same size, but the EPILOGUE may change the 
-        # tile size in the N-dimension, so we use .shape[1], rather than BLOCK_N.
-        out_tile_n_offsets = tile_n_idx // BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
-        out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
 
         if SCATTER_ROWS:
-            # Can avoid masking, since offsets are 0 <= tile_m_offsets < m
-            permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)     
-            out_offsets = permute_a_indices[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
-            out_ptrs = out_ptr + out_offsets
+            tile_m_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)     
         else:
-            out_row_offsets = start_idx + tile_m_offsets
-            out_offsets = out_row_offsets[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
-            out_ptrs = out_ptr + out_offsets
+            tile_m_indices = start_idx + tile_m_offsets
 
-        store_split_epilogue(out_ptrs, out_stride_2, a_mask, N - tile_n_idx, accs)
-    
+        # These are the N-dim of the activation blocks
+        PRE_ACT_SPLIT_N: tl.constexpr = BLOCK_N // EPILOGUE_SPLIT
+
+        for i in tl.static_range(len(accs)):
+            pre = accs[i]
+
+            if RETURN_PREACTIVATION:
+                tl.static_assert(not SCATTER_ROWS)
+                tl.static_assert(pre.shape[1] == PRE_ACT_SPLIT_N)
+                pre_tile_n_offsets = tile_n_idx + tl.arange(0, PRE_ACT_SPLIT_N)
+                #pre_tile_n_offsets = tl.max_contiguous(tl.multiple_of(pre_tile_n_offsets, BLOCK_N), BLOCK_N)
+                pre_ptrs = preactivation_ptr + tile_m_indices[:, None] * preactivation_stride_1 + pre_tile_n_offsets * preactivation_stride_2
+                n_offset = tl.arange(0, PRE_ACT_SPLIT_N)
+                epilogue_split_offset = i * PRE_ACT_SPLIT_N
+                tl.store(
+                    pre_ptrs + epilogue_split_offset * preactivation_stride_2, 
+                    pre, 
+                    mask=token_mask[:, None] & (tile_n_idx + epilogue_split_offset + n_offset < N))
+
+            out = activation(pre, EPILOGUE, None) if EPILOGUE is not None else pre
+
+            tl.static_assert(out.shape[1] * EPILOGUE_SPLIT == POST_ACT_BLOCK_N)
+            out_tile_n_idx = tile_n_idx // BLOCK_N * POST_ACT_BLOCK_N
+            out_tile_n_offsets = out_tile_n_idx + tl.arange(0, out.shape[1])
+            out_ptrs = out_ptr + tile_m_indices[:, None] * out_stride_1 + out_tile_n_offsets * out_stride_2
+            n_offset = tl.arange(0, out.shape[1])
+            epilogue_split_offset = i * out.shape[1]
+            
+            # output n-dimension depends on the activation function
+            if BLOCK_N > POST_ACT_BLOCK_N:
+                OUT_N = N // 2
+            else:
+                OUT_N = N
+            
+            tl.store(
+                out_ptrs + epilogue_split_offset * out_stride_2, 
+                out,
+                mask=token_mask[:, None] & (out_tile_n_idx + epilogue_split_offset + n_offset < OUT_N))
+        
         tile_id += NUM_PROGRAMS
+    return tile_id
     
-    return tile_id, num_tiles
 
 @triton.jit
 def m_grouped_gemm_persistent_kernel(
@@ -218,15 +256,24 @@ def m_grouped_gemm_persistent_kernel(
     b_stride_1, b_stride_2, b_stride_3,
     out_ptr,
     out_stride_1, out_stride_2,
+    # This is an optional pointer to return the gemm before a fused activation
+    preactivation_ptr,
+    preactivation_stride_1, preactivation_stride_2,
+    # This is an optional pointer to a pre-activation from a forward pass, it's
+    # necessary for fusing the grad-activation in a backward pass.
+    preact_for_grad_ptr,
+    preact_for_grad_stride_1, preact_for_grad_stride_2,
     group_indices_ptr,
     permute_indices_ptr,
     NUM_TOKENS: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
     K: tl.constexpr,
     N: tl.constexpr,
+    POST_ACT_BLOCK_N: tl.constexpr,
     TOPK: tl.constexpr,
     GATHER_ROWS: tl.constexpr,
     SCATTER_ROWS: tl.constexpr,
+    RETURN_PREACTIVATION: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
     USE_A_TENSOR_DESCRIPTOR: tl.constexpr,
@@ -239,6 +286,7 @@ def m_grouped_gemm_persistent_kernel(
     CACHE_GROUP_M: tl.constexpr,
     EPILOGUE: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
+    GRAD_ACT: tl.constexpr,
     DISALLOW_ACC_MULTI_BUFFER: tl.constexpr,
 ):
     tile_id = tl.program_id(axis=0)
@@ -253,19 +301,28 @@ def m_grouped_gemm_persistent_kernel(
     tl.assume(out_stride_1 > 0)
     tl.assume(out_stride_2 > 0)
     
-    start_idx = 0
-    for problem_id in tl.range(0, NUM_EXPERTS, loop_unroll_factor=2):
-        end_idx = tl.load(group_indices_ptr + problem_id + 1, cache_modifier=".ca")
+    for problem_id in tl.range(0, NUM_EXPERTS):
+        group_indices = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2), cache_modifier=".ca")
+        start_idx, end_idx = group_indices.split()
         m = end_idx - start_idx
+        
+        num_m_tiles = tl.cdiv(m, BLOCK_M)
+        num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)    
+        num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
+        tl.assume(num_tiles >= 0)
+        end_tile_id = last_problem_end + num_tiles
+        tiles_in_problem = tl.cdiv(end_tile_id - tile_id, NUM_PROGRAMS)
+        tl.assume(tiles_in_problem >= 1)
         
         tl.assume(start_idx >= 0)
         tl.assume(end_idx >= start_idx)
         tl.assume(m >= 0)
         tl.assume(m <= NUM_TOKENS * TOPK)
 
-        tile_id, num_tiles = m_grouped_gemm_inner_kernel(
+        tile_id = m_grouped_gemm_inner_kernel(
             problem_id,
             tile_id,
+            end_tile_id,
             start_idx,
             end_idx,
             last_problem_end,
@@ -275,14 +332,19 @@ def m_grouped_gemm_persistent_kernel(
             b_stride_1, b_stride_2, b_stride_3,
             out_ptr,
             out_stride_1, out_stride_2,
-            group_indices_ptr,
+            preactivation_ptr,
+            preactivation_stride_1, preactivation_stride_2,
+            preact_for_grad_ptr,
+            preact_for_grad_stride_1, preact_for_grad_stride_2,
             permute_indices_ptr,
             m,
             K,
             N,
+            POST_ACT_BLOCK_N,
             TOPK,
             GATHER_ROWS,
             SCATTER_ROWS,
+            RETURN_PREACTIVATION,
             IS_A_TRANSPOSED,
             IS_B_TRANSPOSED,
             USE_A_TENSOR_DESCRIPTOR,
@@ -294,12 +356,11 @@ def m_grouped_gemm_persistent_kernel(
             CACHE_GROUP_M,
             EPILOGUE,
             EPILOGUE_SPLIT,
-            DISALLOW_ACC_MULTI_BUFFER
+            GRAD_ACT,
         )
     
-        start_idx = end_idx
         last_problem_end += num_tiles 
-
+    
 _fast_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     configs=fast_autotune_configs(persistent=True),
     key=['NUM_TOKENS', 'E', 'N', 'K', 'GATHER_ROWS', 'SCATTER_ROWS'],
@@ -325,8 +386,8 @@ def m_grouped_gemm_default_config(e, params, dtype):
             "BLOCK_N": BLOCK_N, 
             "BLOCK_K": BLOCK_K, 
             "NUM_PROGRAMS": get_gpu_sm_count(),
-            "CACHE_GROUP_M": 8,
-            "EPILOGUE_SPLIT": 2,
+            "CACHE_GROUP_M": 0,
+            "EPILOGUE_SPLIT": 1,
             "DISALLOW_ACC_MULTI_BUFFER": False,
             "USE_A_TENSOR_DESCRIPTOR": False,
             "USE_B_TENSOR_DESCRIPTOR": False
@@ -335,6 +396,27 @@ def m_grouped_gemm_default_config(e, params, dtype):
         num_stages=num_stages
     )
     return default_config
+
+def _build_outputs(num_tokens, n, device, dtype, params: MGroupedGEMMParams):
+    if params.gather or params.scatter:
+        out_rows = num_tokens * params.topk
+    else:
+        out_rows = num_tokens
+        
+    out_cols = n
+    if params.activation is not None and "glu" in params.activation:
+        if "grad" in params.activation:
+            out_cols *= 2
+        else:
+            out_cols //= 2
+    out = torch.empty((out_rows, out_cols), device=device, dtype=dtype)
+    
+    if params.return_preactivation:
+        preactivation = torch.empty((out_rows, n), device=device, dtype=dtype)
+    else:
+        preactivation = None
+        
+    return out, preactivation
 
 def m_grouped_gemm(
     a: torch.Tensor,
@@ -357,16 +439,12 @@ def m_grouped_gemm(
     if params.is_b_transposed:
         k, n = n, k
     
-    if params.gather or params.scatter:
-        out_rows = num_tokens * params.topk
-    else:
-        out_rows = num_tokens
-    out_cols = n
-    if params.activation is not None and "glu" in params.activation:
-        out_cols //= 2
-
-    out = torch.empty((out_rows, out_cols), device=a.device, dtype=a.dtype)
-
+    out, preactivation = _build_outputs(num_tokens, n, a.device, a.dtype, params)
+    
+    out.requires_grad = a.requires_grad
+    if preactivation is not None:
+        preactivation.requires_grad = a.requires_grad
+    
     default_config = m_grouped_gemm_default_config(b.size(0), params, a.dtype)
     default_kwargs = default_config.all_kwargs()
     # torch.compile(fullgraph=True) does not supporting passing in num_ctas
@@ -383,15 +461,18 @@ def m_grouped_gemm(
         else:
             block_size = [1, block_k, block_n]
         b_desc = TensorDescriptor.from_tensor(b, block_size)
-        
+
     use_a_tensor_descriptor = default_kwargs["USE_A_TENSOR_DESCRIPTOR"]
     del default_kwargs["USE_A_TENSOR_DESCRIPTOR"]
     use_a_tensor_descriptor = use_a_tensor_descriptor and all([(s * a.element_size()) % 16 == 0 for s in a.stride()[:-1]])
     if use_a_tensor_descriptor:
-        # TMA descriptors require a global memory allocation
+        # device TMA descriptors require a global memory allocation
         def alloc_fn(size: int, alignment: int, stream: Optional[int]):
             return torch.empty(size, device="cuda", dtype=torch.int8)
         triton.set_allocator(alloc_fn)
+    
+    #num_tiles = triton.cdiv(out.size(0), default_kwargs["BLOCK_M"]) * triton.cdiv(n, default_kwargs["BLOCK_N"])
+    #default_kwargs["NUM_PROGRAMS"] = min(default_kwargs["NUM_PROGRAMS"], num_tiles)
 
     func = m_grouped_gemm_persistent_kernel
     #if autotune_mode == AutotuneMode.FAST:
@@ -403,6 +484,8 @@ def m_grouped_gemm(
     
     # TODO: torch.compile doesn't like passing in function    
     epilogue = params.activation
+
+    post_act_n, preact_for_grad_n = act_n(params.activation, block_n)
            
     grid = lambda META: (META["NUM_PROGRAMS"],)
 
@@ -414,21 +497,32 @@ def m_grouped_gemm(
         b.stride(0), b.stride(1), b.stride(2),
         out,
         out.stride(0), out.stride(1),
+        preactivation if params.return_preactivation else None,
+        preactivation.stride(0) if params.return_preactivation else None, 
+        preactivation.stride(1) if params.return_preactivation else None,
+        params.pre_act_for_grad,
+        params.pre_act_for_grad.stride(0) if params.pre_act_for_grad is not None else None,
+        params.pre_act_for_grad.stride(1) if params.pre_act_for_grad is not None else None,
         group_indices, 
         params.permute_indices, 
         NUM_TOKENS=num_tokens,
         NUM_EXPERTS=e, 
         K=k,
         N=n,
+        POST_ACT_BLOCK_N=post_act_n,
         TOPK=params.topk,
         GATHER_ROWS=params.gather,
         SCATTER_ROWS=params.scatter,
+        RETURN_PREACTIVATION=params.return_preactivation,
         IS_A_TRANSPOSED=params.is_a_transposed,
         IS_B_TRANSPOSED=params.is_b_transposed,
         USE_A_TENSOR_DESCRIPTOR=use_a_tensor_descriptor,
         USE_B_TENSOR_DESCRIPTOR=use_b_tensor_descriptor,
         EPILOGUE=epilogue,
+        GRAD_ACT=(params.pre_act_for_grad is not None) and "grad" in params.activation,
         **default_kwargs
     )
-        
-    return out
+    
+    print(a.requires_grad, out.requires_grad)
+    
+    return MGroupedGEMMOutput(output=out, preactivation=preactivation)
