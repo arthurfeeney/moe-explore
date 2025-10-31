@@ -6,10 +6,11 @@ from moe_explore.params import MOEParams
 from moe_explore.testing import random_topk_router, random_mlp, random_interleaved_glu
 from moe_explore.baseline.torch_grouped_mm import TorchGroupedMMMoE
 
-num_tokens = 16000
+# olmoe sizes
+num_tokens = 32768
 hidden_dim = 2048
-intermediate_dim = 768
-num_experts = 128
+intermediate_dim = 1024
+num_experts = 64
 topk = 8
 activation = "swiglu"
 
@@ -25,10 +26,10 @@ expert_params = random_interleaved_glu(
     torch.bfloat16,
 )
 
-#input.requires_grad = True
-#router_params.router_weight.requires_grad = True
-#expert_params.weight1.requires_grad = True
-#expert_params.weight2.requires_grad = True
+input.requires_grad = True
+router_params.router_weight.requires_grad = True
+expert_params.weight1.requires_grad = True
+expert_params.weight2.requires_grad = True
 
 moe_params = MOEParams(router_params, expert_params, num_experts=num_experts, topk=topk)
 
@@ -51,21 +52,15 @@ with profile(
         repeat=1
     )
 ) as prof:
-    
+    #with torch.inference_mode():
     for i in range(7):
-
         torch.compiler.cudagraph_mark_step_begin()
-                
         with record_function("topk_moe_forward"):
             #output = topk_moe_compiled(input, moe_params)
-            output = moe(input, lambda x: router(x, router_params))
-            
-        #with record_function("topk_moe_backward"):
-        #   output.sum().backward()
-            
+            output, _ = moe(input, lambda x: router(x, router_params))
+        with record_function("topk_moe_backward"):
+            output.sum().backward()
         torch.cuda.synchronize()
-        
-        
         prof.step()
-        
+    
 prof.export_chrome_trace("trace.json")

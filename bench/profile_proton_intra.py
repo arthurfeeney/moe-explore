@@ -13,7 +13,6 @@ from moe_explore.expert_permute import get_token_indices
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 
-
 def main():
     # setup inputs before instrumenting, in case pytorch ops happen to use triton
     input, weight, group_indices, params = setup_inputs(num_tokens=2048)

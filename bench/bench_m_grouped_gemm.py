@@ -1,3 +1,6 @@
+import argparse
+import pathlib
+import time
 from functools import partial
 import math
 from sympy.utilities.misc import func_name
@@ -6,8 +9,7 @@ from moe_explore.expert_permute import get_token_indices
 from moe_explore.triton_kernels.m_grouped_gemm import m_grouped_gemm, MGroupedGEMMParams
 from moe_explore.triton_kernels.autotune_config import AutotuneMode
 from moe_explore.testing import random_groups, random_routing, random_skewed_routing, perfect_routing
-from moe_explore.gpu_utils import get_gpu_sm_version
-from triton.testing import perf_report, do_bench, Benchmark, do_bench_cudagraph
+from triton.testing import perf_report, do_bench, Benchmark
 
 try:
     from transformer_engine.pytorch.module.grouped_linear import GroupedLinear
@@ -35,14 +37,12 @@ def m_grouped_gemm_benchmark_extensive(
     if HAVE_TRANSFORMER_ENGINE:
         line_vals.append("transformer-engine")
         line_names.append("TE Grouped Linear")
-    # as of 2.9.0, torch._grouped_mm only supports hopper or newer.
-    if HAVE_TORCH_GROUPED_MM and get_gpu_sm_version() >= 90:
-        line_vals.append("torch-grouped-mm")
-        line_names.append("Torch Grouped MM")
+    line_vals.append("torch-grouped-mm")
+    line_names.append("Torch Grouped MM")
     
     return Benchmark(
         x_names=["num_tokens"],
-        x_vals=list(range(256, 17000 + 1, 512)),
+        x_vals=list(range(256, 12000 + 1, 384)),
         line_arg="provider",
         line_vals=line_vals,
         line_names=line_names,
@@ -221,10 +221,11 @@ configs.append(
 
 def bench(f):
     quantiles = [0.5, 0.2, 0.8]
+    # ensure f is autotuned / compiled before running benchmark
+    f()
     # do_bench_cuda_graph is also an option, but doesn't clear
     # the l2-cache. So, I think do_bench is a better option for this.
-    return do_bench(lambda: f(), quantiles=quantiles)# warmup=150, rep=300)
-    #return do_bench_cudagraph(lambda: f(), quantiles=quantiles, rep=100)
+    return do_bench(lambda: f(), quantiles=quantiles, warmup=50, rep=200)
 
 dist = torch.randn
 #dist = torch.zeros
@@ -285,7 +286,7 @@ def benchmark_gemm_reference(num_tokens, num_groups, N, K, topk, dtype):
     assert num_tokens % num_groups == 0
     input = dist((num_groups, num_tokens_times_topk // num_groups, K), device=torch.device("cuda"), dtype=dtype)
     weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) * 0.023
-    f = torch.bmm
+    f = torch.compile(torch.bmm, fullgraph=True)
     f(input, weight)
     return bench(lambda: f(input, weight))
 
@@ -301,7 +302,6 @@ def benchmark_torch_grouped_mm(num_tokens, num_groups, N, K, topk, dtype, p):
     input = dist((num_tokens_times_topk, K), device=torch.device("cuda"), dtype=dtype)
     weight = dist((num_groups, K, N), device=torch.device("cuda"), dtype=dtype) * 0.023
     offsets = p.group_indices[1:]
-    print(input.size(), p.group_indices.size(), p.group_indices)
     func = torch.compile(_grouped_mm, fullgraph=True)
     func(input, weight, offs=offsets)
     try:
@@ -357,4 +357,11 @@ def benchmark_m_grouped_gemm_forward(
     tflops = flops / (ms / 1000) * 1e-12
     return tflops
 
-benchmark_m_grouped_gemm_forward.run(print_data=True, save_path="./")
+parser = argparse.ArgumentParser()
+args = parser.parse_args()
+
+save_path = pathlib.Path(f"./microbenchmarks/m_grouped_gemm") / torch.cuda.get_device_name() / str(time.time())
+save_path.mkdir(parents=True, exist_ok=True)
+print("Saving results to " + str(save_path))
+
+benchmark_m_grouped_gemm_forward.run(print_data=True, save_path=save_path)
