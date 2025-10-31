@@ -66,6 +66,13 @@ def activation(
     act: Optional[Activation] = None,
     grad_out: Optional[torch.Tensor] = None
 ):
+    if isinstance(x, tuple):
+        # unfused GLU
+        gate, up = x
+        act = "gelu" if act == Activation.GEGLU else act
+        act = "silu" if act == Activation.SWIGLU else act
+        return activation(gate, act) * up
+    
     if act is None or act == Activation.NONE:
         return x
     if act == Activation.RELU:

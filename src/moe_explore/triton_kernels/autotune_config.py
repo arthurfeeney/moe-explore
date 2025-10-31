@@ -1,4 +1,4 @@
-from dataclasses import dataclass, astuple
+from dataclasses import dataclass
 from enum import StrEnum
 import itertools
 import triton
@@ -45,14 +45,17 @@ def fast_autotune_configs(persistent: bool):
         params.append(AutotuneParam("NUM_PROGRAMS", [get_gpu_sm_count()]))
     return generate_configs(params)
 
-def max_autotune_configs(persistent: bool):
+def max_autotune_configs(persistent: bool, k_loop_stages: bool = False):
     block_sizes = [64, 128, 256]
     block_m = AutotuneParam("BLOCK_M", block_sizes)
     block_n = AutotuneParam("BLOCK_N", block_sizes)
-    block_k = AutotuneParam("BLOCK_K", [32, 64, 128])
-    group_sizes = AutotuneParam("CACHE_GROUP_M", [0, 4, 6, 8, 10])
+    block_k = AutotuneParam("BLOCK_K", [32, 64])
+    group_sizes = AutotuneParam("CACHE_GROUP_M", [0, 4, 6, 8])
     num_warps = AutotuneParam("num_warps", [4, 8])
-    num_stages = AutotuneParam("num_stages", [3, 4, 5, 6])
+    if k_loop_stages:
+        num_stages = AutotuneParam("K_LOOP_STAGES", [3, 4, 5])
+    else:
+        num_stages = AutotuneParam("num_stages", [3, 4, 5])
     epilogue_split = AutotuneParam("EPILOGUE_SPLIT", [1, 2])
     params = [block_m, block_n, block_k, num_warps, num_stages, group_sizes, epilogue_split]
     if persistent:

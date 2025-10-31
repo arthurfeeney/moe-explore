@@ -17,8 +17,8 @@ def m_grouped_mlp_forward(
     assert tokens.dim() == 2
     assert weight1.dim() == 3
     assert weight2.dim() == 3
-    assert group_indices.size(0) == weight1.size(0) + 1
-    assert group_indices.size(0) == weight2.size(0) + 1
+    assert group_indices.size(0) == weight1.size(0)
+    assert group_indices.size(0) == weight2.size(0)
     assert num_tokens > 0 and topk > 0
     
     # always fuse the activation during inference.
@@ -80,8 +80,8 @@ def m_grouped_mlp_backward(
     assert grad_output.dim() == 2
     assert weight1.dim() == 3
     assert weight2.dim() == 3
-    assert group_indices.size(0) == weight1.size(0) + 1
-    assert group_indices.size(0) == weight2.size(0) + 1
+    assert group_indices.size(0) == weight1.size(0)
+    assert group_indices.size(0) == weight2.size(0)
     assert num_tokens > 0 and topk > 0
     
     grad_activation: Optional[str] = "grad_" + activation if activation is not None else None

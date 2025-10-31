@@ -59,6 +59,7 @@ def k_grouped_gemm_inner_kernel(
     BLOCK_K: tl.constexpr,
     CACHE_GROUP_M: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
+    K_LOOP_STAGES: tl.constexpr
 ):
     num_m_tiles = tl.cdiv(M, BLOCK_M)
     num_n_tiles = tl.cdiv(N, BLOCK_N)    
@@ -90,36 +91,58 @@ def k_grouped_gemm_inner_kernel(
             b_row_offsets = (start_idx + k_offset) * b_stride_1
             b_col_offsets = tile_n_offsets * b_stride_2            
             b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
+            
+        MASK_M: tl.constexpr = M % BLOCK_M != 0
+        MASK_N: tl.constexpr = N % BLOCK_N != 0
+        
+        if GATHER_A or GATHER_B:
+            permute_indices_offsets = start_idx + tl.arange(0, BLOCK_K)
+            permute_indices_offsets = tl.max_contiguous(tl.multiple_of(permute_indices_offsets, BLOCK_K), BLOCK_K)
+            permute_indices_ptrs = permute_indices_ptr + permute_indices_offsets
+            
+        a_col_ptrs = a_ptr + tile_m_offsets * a_stride_2
+        b_col_ptrs = b_ptr + tile_n_offsets * b_stride_2
        
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for k_iter in tl.range(0, tl.cdiv(k, BLOCK_K)):
-            #if not GATHER_A:
-            #    tl.multiple_of(a_ptrs, [16, 16])
-            #if not GATHER_B:
-            #    tl.multiple_of(b_ptrs, [16, 16])
-            
-            k_step_offset = start_idx + tl.arange(0, BLOCK_K) + k_iter * BLOCK_K
-            k_mask = k_step_offset < end_idx
-            
-            a_mask = k_mask[:, None] & (tile_m_offsets < M)
-            b_mask = k_mask[:, None] & (tile_n_offsets < N)
-        
+        for k_iter in tl.range(0, tl.cdiv(k, BLOCK_K), num_stages=K_LOOP_STAGES):
+            if not GATHER_A:
+                tl.multiple_of(a_ptrs, [16, 16])
+            if not GATHER_B:
+                tl.multiple_of(b_ptrs, [16, 16])
             if GATHER_A or GATHER_B:
-                # Ideallly, thsi will be pipeline as well...!
-                gather_indices = tl.load(permute_indices_ptr + k_step_offset,
-                                         mask=k_mask,
-                                         other=0)
+                tl.multiple_of(permute_indices_ptrs, [16])
+            if GATHER_A:
+                tl.multiple_of(a_col_ptrs, [16])
+            if GATHER_B:
+                tl.multiple_of(b_col_ptrs, [16])
+            
+            if GATHER_A or GATHER_B:
+                gather_indices = tl.load(permute_indices_ptrs)
+                gather_indices = tl.max_contiguous(tl.multiple_of(gather_indices, BLOCK_K), BLOCK_K)
                 
             if GATHER_A:
                 a_row_offsets = (gather_indices // TOPK) * a_stride_1
-                a_col_offsets = tile_m_offsets * a_stride_2
-                a_ptrs = a_ptr + a_row_offsets[:, None] + a_col_offsets
+                a_row_offsets = tl.max_contiguous(tl.multiple_of(a_row_offsets, BLOCK_K), BLOCK_K)
+                a_ptrs = a_col_ptrs + a_row_offsets[:, None]
                 tl.multiple_of(a_ptrs, [16, 16])
             if GATHER_B:
                 b_row_offsets = gather_indices * b_stride_1
-                b_col_offsets = tile_n_offsets * b_stride_2
-                b_ptrs = b_ptr + b_row_offsets[:, None] + b_col_offsets
+                b_ptrs = b_col_ptrs + b_row_offsets[:, None]
                 tl.multiple_of(b_ptrs, [16, 16])
+            
+            
+            k_remaining = k - k_iter * BLOCK_K
+            k_mask = k_offset < k_remaining
+
+            if MASK_M:
+                a_mask = k_mask[:, None] & (tile_m_offsets < M)
+            else:
+                a_mask = k_mask[:, None]
+            
+            if MASK_N:
+                b_mask = k_mask[:, None] & (tile_n_offsets < N)
+            else:
+                b_mask = k_mask[:, None]
 
             a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
             b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
@@ -130,17 +153,22 @@ def k_grouped_gemm_inner_kernel(
                 a_ptrs += BLOCK_K * a_stride_1
             if not GATHER_B:
                 b_ptrs += BLOCK_K * b_stride_1
+            if GATHER_A or GATHER_B:
+                permute_indices_ptrs += BLOCK_K
 
         # Splitting the epilogue is supposed to help overlap the next iteration 
         # of the outer loop with the epilogue.
         accs = epilogue_split(acc, EPILOGUE_SPLIT, BLOCK_M, BLOCK_N)
-
+        
         if not USE_OUT_TENSOR_DESCRIPTOR:
+            tile_id_in_gemm = tile_id - last_problem_end
+            tile_m_idx, tile_n_idx = get_tile_id_in_group(
+                tile_id_in_gemm, M, N, BLOCK_M, BLOCK_N, CACHE_GROUP_M)
             tile_m_offsets = tile_m_idx + tl.arange(0, BLOCK_M)
             tile_m_offsets = tl.max_contiguous(tl.multiple_of(tile_m_offsets % M, BLOCK_M), BLOCK_M)
             out_m_mask = tile_m_idx + tl.arange(0, BLOCK_M) < M
             out_tile_n_offsets = tile_n_idx + tl.arange(0, accs[0].shape[1]) #// BLOCK_N * (accs[0].shape[1] * EPILOGUE_SPLIT) + tl.arange(0, accs[0].shape[1])
-            #out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
+            out_tile_n_offsets = tl.max_contiguous(tl.multiple_of(out_tile_n_offsets, accs[0].shape[1]), accs[0].shape[1])
             out_row_offsets = tile_m_offsets
             out_offsets = problem_id * out_stride_1 + out_row_offsets[:, None] * out_stride_2 + out_tile_n_offsets * out_stride_3
             out_ptrs = out_ptr + out_offsets
@@ -187,6 +215,7 @@ def k_grouped_gemm_persistent_kernel(
     BLOCK_K: tl.constexpr,
     CACHE_GROUP_M: tl.constexpr,
     EPILOGUE_SPLIT: tl.constexpr,
+    K_LOOP_STAGES: tl.constexpr
 ):
     tile_id = tl.program_id(axis=0)
     last_problem_end = 0
@@ -201,8 +230,12 @@ def k_grouped_gemm_persistent_kernel(
     tl.assume(out_stride_3 > 0)
     
     for problem_id in tl.range(0, NUM_EXPERTS):
-        group_bounds = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2), cache_modifier=".ca")
-        start_idx, end_idx = group_bounds.split()
+        if problem_id == 0:
+            start_idx = 0
+            end_idx = tl.load(group_indices_ptr + problem_id)
+        else:
+            group_bounds = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2) - 1)
+            start_idx, end_idx = group_bounds.split()
         k = end_idx - start_idx
         
         tl.assume(start_idx >= 0)
@@ -237,6 +270,7 @@ def k_grouped_gemm_persistent_kernel(
             BLOCK_K,
             CACHE_GROUP_M,
             EPILOGUE_SPLIT,
+            K_LOOP_STAGES
         )
         
         last_problem_end += num_tiles
@@ -248,31 +282,60 @@ _fast_autotune_k_grouped_gemm_persistent_kernel = triton.autotune(
 )(k_grouped_gemm_persistent_kernel)
 
 _max_autotune_k_grouped_gemm_persistent_kernel = triton.autotune(
-    configs=max_autotune_configs(persistent=True),
+    configs=max_autotune_configs(persistent=True, k_loop_stages=True),
     key=['NUM_TOKENS', 'E', 'M', 'N', 'GATHER_A', 'GATHER_B'],
     reset_to_zero=['out_ptr']
 )(k_grouped_gemm_persistent_kernel)
 
 def k_grouped_gemm_default_config(e, params, dtype):
-    BLOCK_M = 128
-    BLOCK_N = 256
-    BLOCK_K = 32
-    num_stages = 5
-    if dtype == torch.float32:
+    #BLOCK_M = 128
+    #LOCK_N = 256
+    #BLOCK_K = 32
+    #num_stages = 3
+    #if dtype == torch.float32:
         #BLOCK_N //= 2
-        num_stages = 3
+    #    num_stages = 3
     default_config = triton.Config({
-            "BLOCK_M": BLOCK_M, 
-            "BLOCK_N": BLOCK_N, 
-            "BLOCK_K": BLOCK_K,
+            "BLOCK_M": 128, 
+            "BLOCK_N": 256, 
+            "BLOCK_K": 32,
             "NUM_PROGRAMS": get_gpu_sm_count(),
             "CACHE_GROUP_M": 8,
             "EPILOGUE_SPLIT": 2,
-            "USE_OUT_TENSOR_DESCRIPTOR": False
+            "USE_OUT_TENSOR_DESCRIPTOR": False,
+            "K_LOOP_STAGES": 5
         },
-        num_warps=8, 
-        num_stages=num_stages
+        num_warps=8,
+        num_stages=5
     )
+    if params.gather_a:
+        default_config = triton.Config({
+                "BLOCK_M": 128, 
+                "BLOCK_N": 256, 
+                "BLOCK_K": 32,
+                "NUM_PROGRAMS": get_gpu_sm_count(),
+                "CACHE_GROUP_M": 8,
+                "EPILOGUE_SPLIT": 2,
+                "USE_OUT_TENSOR_DESCRIPTOR": False,
+                "K_LOOP_STAGES": 5
+            },
+            num_warps=8,
+            num_stages=5
+        )
+    elif params.gather_b:
+        default_config = triton.Config({
+                "BLOCK_M": 128, 
+                "BLOCK_N": 256, 
+                "BLOCK_K": 32,
+                "NUM_PROGRAMS": get_gpu_sm_count(),
+                "CACHE_GROUP_M": 8,
+                "EPILOGUE_SPLIT": 2,
+                "USE_OUT_TENSOR_DESCRIPTOR": False,
+                "K_LOOP_STAGES": 5
+            },
+            num_warps=8,
+            num_stages=5
+        )
     return default_config
 
 def k_grouped_gemm(
@@ -293,9 +356,9 @@ def k_grouped_gemm(
     _, m = a.size()
     _, n = b.size()
 
-    out = torch.empty((group_indices.size(0) - 1, m, n), device=a.device, dtype=a.dtype)
+    out = torch.empty((group_indices.size(0), m, n), device=a.device, dtype=a.dtype)
 
-    default_config = k_grouped_gemm_default_config(group_indices.size(0) - 1, params, a.dtype)
+    default_config = k_grouped_gemm_default_config(group_indices.size(0), params, a.dtype)
     default_kwargs = default_config.all_kwargs()
     del default_kwargs["num_ctas"]
     
@@ -331,7 +394,7 @@ def k_grouped_gemm(
         group_indices, 
         params.permute_indices, 
         NUM_TOKENS=num_tokens,
-        NUM_EXPERTS=group_indices.size(0) - 1, 
+        NUM_EXPERTS=group_indices.size(0), 
         M=m,
         N=n,
         TOPK=params.topk,

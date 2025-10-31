@@ -32,6 +32,6 @@ def scattermoe_forward(
     mlp,
     topk: int
 ):
-    topk_scores, topk_indices, _ = router(input, router_params)
+    topk_scores, topk_indices, router_logits = router(input, router_params)
     output = mlp(input, topk_scores, topk_indices) 
-    return output
+    return output, router_logits

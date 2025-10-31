@@ -17,7 +17,7 @@ def topk_moe(
 ):
     ep: MLPParams = params.expert_params
     topk_scores, topk_indices, router_logits = router(input, params.router_params)
-    perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=True)
+    perm_to_group_indices = get_token_indices(topk_indices, params.topk, params.num_experts, zero_prefix=False)
     down = m_grouped_mlp(
         input,
         ep.weight1,

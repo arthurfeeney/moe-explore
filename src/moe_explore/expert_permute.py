@@ -16,38 +16,40 @@ class PermToGroupIndices:
     group_indices: torch.Tensor
     indices: torch.Tensor
 
-@torch.compile
 def get_token_indices(
     expert_indices, 
     topk, 
     num_experts,
     zero_prefix=False
 ):
-    flat_expert_indices = expert_indices.view(-1)
-    indices = flat_expert_indices.argsort().to(torch.int32)
-    counts = torch.zeros(num_experts, dtype=torch.int32, device=expert_indices.device)
-    torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts, out=counts)
+    # The routing choices are not used in the backward pass, so this
+    # can always use no_grad.
+    with torch.no_grad():
+        flat_expert_indices = expert_indices.view(-1)
+        # The argsort returns int64 indices, but we don't need more than 32 bits for the indices.
+        indices = flat_expert_indices.argsort().to(torch.int32)
+        counts = torch.histc(flat_expert_indices, min=0, max=num_experts - 1, bins=num_experts)
+        if zero_prefix:
+            group_indices = torch.empty(counts.size(0) + 1, dtype=torch.int32, device=expert_indices.device)
+            group_indices[0] = 0
+            torch.cumsum(counts, dim=0, out=group_indices[1:])
+        else:
+            group_indices = torch.empty(counts.size(0), dtype=torch.int32, device=expert_indices.device)
+            torch.cumsum(counts, dim=0, out=group_indices)
+        
+        return PermToGroupIndices(
+            group_indices=group_indices,
+            indices=indices
+        )
 
-    if zero_prefix:
-        group_indices = torch.empty(counts.size(0) + 1, dtype=torch.int32, device=expert_indices.device)
-        group_indices[0] = 0
-        torch.cumsum(counts, dim=0, out=group_indices[1:])
-    else:
-        group_indices = counts.cumsum(dim=0)
-    
-    return PermToGroupIndices(
-        group_indices=group_indices,
-        indices=indices
-    )
-
-@torch.compile
-def expert_input_permute(
+def expert_input_permute(# 
     tokens: torch.Tensor, 
     expert_indices: torch.Tensor, 
     num_experts: int,
-    topk: int
+    topk: int,
+    zero_prefix: bool = True
 ) -> GroupedTokens:
-    indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=True)
+    indices = get_token_indices(expert_indices, topk, num_experts, zero_prefix=zero_prefix)
     output = tokens[indices.indices // topk]
     #output = row_gather(tokens, indices.indices // topk)
     return GroupedTokens(
@@ -56,7 +58,6 @@ def expert_input_permute(
         indices=indices.indices 
     )
 
-@torch.compile
 def expert_output_permute(
     grouped_tokens: GroupedTokens,
     expert_scores: torch.Tensor,

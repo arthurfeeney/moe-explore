@@ -18,7 +18,7 @@ def m_grouped_gemm_forward(
 ):
     assert tokens.dim() == 2
     assert weight.dim() == 3
-    assert group_indices.size(0) == weight.size(0) + 1
+    assert group_indices.size(0) == weight.size(0)
     assert num_tokens > 0 and topk > 0
     if gather or scatter:
         assert permute_indices is not None      
@@ -57,10 +57,7 @@ def m_grouped_gemm_backward(
     for the grad_weight calculation. So it currently cannot reuse the m_grouped_gemm kernel.
     """
     grad_token_params = MGroupedGEMMParams(
-        # TODO: This * topk is used because inside the kernel the gather // topk...
-        # Since the grad_output is the otuput of grad(scale_and_reduce), we do not want
-        # to divide by topk inside the kernel. This should just be toggled inside the kernel.
-        permute_indices=permute_indices * topk if forward_scatter else permute_indices,
+        permute_indices=permute_indices,
         gather=forward_scatter,
         scatter=forward_gather,
         num_tokens=num_tokens,
@@ -68,6 +65,9 @@ def m_grouped_gemm_backward(
         activation=None,
         is_a_transposed=False,
         is_b_transposed=True,
+        # This kernel processes the [t, k, d] output of the grad(scale_and_reduce),
+        # so we do not want to divide by topk inside the kernel.
+        div_permute_indices=False,
         pre_act_for_grad=None,
     )
     grad_tokens = triton_m_grouped_gemm(
@@ -80,6 +80,15 @@ def m_grouped_gemm_backward(
     if forward_gather:
         # The scatter is fused, but we need to reduce across the top-k entries.
         grad_tokens = grad_tokens.view(-1, topk, tokens.size(-1)).sum(dim=1)
+
+    #if forward_gather:
+    #    gather_tokens = tokens[permute_indices // topk]
+    #else:
+    #    gather_tokens = tokens
+    #if forward_scatter:
+    #    gather_grad_output = grad_output[permute_indices]
+    #else:
+    #    gather_grad_output = grad_output
 
     grad_weight_params = KGroupedGEMMParams(
         permute_indices=permute_indices,
@@ -165,7 +174,13 @@ def torch_grouped_gemm(
     c = torch.zeros(c_rows, weight.size(-1), device=tokens.device, dtype=dtype)
     
     for i in range(weight.size(0)):
-        glo, ghi = group_indices[i].item(), group_indices[i + 1].item()
+        if i == 0:
+            glo = 0
+            ghi = group_indices[i].item()
+        else:
+            glo = group_indices[i - 1].item()
+            ghi = group_indices[i].item()
+                    
         if gather:
             index = gather_indices[glo:ghi].unsqueeze(-1).expand(-1, tokens.size(-1))
             a_gather = torch.gather(tokens, dim=0, index=index)

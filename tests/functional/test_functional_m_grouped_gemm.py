@@ -65,7 +65,6 @@ def test_m_grouped_gemm_gather(
         topk_indices.view(-1),
         topk,
         num_experts,
-        zero_prefix=True
     )  
     gather = True
     scatter = False
@@ -102,7 +101,6 @@ def setup(func, num_tokens: int, num_experts: int, topk: int, dtype: torch.dtype
         topk_indices.view(-1),
         topk,
         num_experts,
-        zero_prefix=True
     )
     gather = False
     scatter = True

@@ -160,7 +160,6 @@ def test_m_grouped_gemm_gather(
         topk_indices.view(-1),
         topk,
         num_experts,
-        zero_prefix=True
     )   
 
     params = MGroupedGEMMParams(
@@ -201,7 +200,6 @@ def test_m_grouped_gemm_scatter(
         topk_indices.view(-1),
         topk,
         num_experts,
-        zero_prefix=True
     )
 
     params = MGroupedGEMMParams(

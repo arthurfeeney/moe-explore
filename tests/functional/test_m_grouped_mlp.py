@@ -37,7 +37,6 @@ def test_m_grouped_mlp(
         topk_indices.view(-1),
         topk,
         num_experts,
-        zero_prefix=True
     )  
     
     tokens.requires_grad = True

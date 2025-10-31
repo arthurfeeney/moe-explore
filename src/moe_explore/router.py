@@ -2,11 +2,9 @@ import torch
 from torch import nn
 from moe_explore.params import RouterParams, TopkRouterParams, ErnieRouterParams
 
-@torch.compile
 def softmax(x):
     return nn.functional.softmax(x, dim=-1, dtype=torch.float32)
 
-@torch.compile
 def router(input:torch.Tensor, params: RouterParams):
     if isinstance(params, TopkRouterParams):
         return topk_router(input, params)
@@ -15,7 +13,6 @@ def router(input:torch.Tensor, params: RouterParams):
     else:
         raise ValueError(f"Unsupported router type: {type(params)}")
 
-@torch.compile
 def topk_router(
     input: torch.Tensor,
     router_params: TopkRouterParams
@@ -37,7 +34,6 @@ def topk_router(
     topk_scores = topk_scores.to(input.dtype)
     return topk_scores, topk_indices, router_logits
 
-@torch.compile
 def ernie_router(
     input: torch.Tensor,
     router_params: ErnieRouterParams
@@ -54,4 +50,4 @@ def ernie_router(
         # I assume it's just to ensure there is not a division by zero.
         weights = weights / torch.clamp(weights.sum(dim=-1, keepdim=True), min=1e-12)
         weights = weights.to(input.dtype)
-        return weights, topk_indices
+        return weights, topk_indices, logits

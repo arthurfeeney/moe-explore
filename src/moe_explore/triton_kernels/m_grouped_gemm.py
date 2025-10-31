@@ -33,6 +33,8 @@ class MGroupedGEMMParams:
     # If we just take a view, like tensor.t(), the strides will account for it, so no flag is needed.
     is_a_transposed: bool = False
     is_b_transposed: bool = False
+    # When gathering, toggle if we divide by topk in the kernel.
+    div_permute_indices: bool = True
     return_preactivation: bool = False
     shared_b: Optional[torch.Tensor] = None
     scales: Optional[torch.Tensor] = None
@@ -76,6 +78,7 @@ def m_grouped_gemm_inner_kernel(
     RETURN_PREACTIVATION: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
+    DIV_PERMUTE_INDICES: tl.constexpr,
     USE_A_TENSOR_DESCRIPTOR: tl.constexpr,
     USE_B_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
@@ -110,7 +113,7 @@ def m_grouped_gemm_inner_kernel(
         
         if GATHER_ROWS:
             permute_a_indices = tl.load(permute_indices_ptr + start_idx + tile_m_offsets)
-            a_indices = permute_a_indices // TOPK
+            a_indices = permute_a_indices // TOPK if DIV_PERMUTE_INDICES else permute_a_indices
         else:
             a_indices = start_idx + tile_m_offsets
 
@@ -136,6 +139,9 @@ def m_grouped_gemm_inner_kernel(
 
         n_mask = tile_n_offsets < N
         token_mask = start_idx + tile_m_idx + tl.arange(0, BLOCK_M) < end_idx
+        
+        MASK_K: tl.constexpr = K % BLOCK_K != 0
+        MASK_N: tl.constexpr = N % BLOCK_N != 0
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
@@ -146,19 +152,28 @@ def m_grouped_gemm_inner_kernel(
 
             k_remaining = K - k * BLOCK_K
             if not USE_A_TENSOR_DESCRIPTOR:
-                a_mask = token_mask[:, None] & (k_offset < k_remaining)
+                if MASK_K:
+                    a_mask = token_mask[:, None] & (k_offset < k_remaining)
+                else:
+                    a_mask = token_mask[:, None]
                 if IS_A_TRANSPOSED:
                     a_mask = a_mask.T
+                    
             if not USE_B_TENSOR_DESCRIPTOR:
-                b_mask = n_mask[None, :] & (k_offset[:, None] < k_remaining)
-                if IS_B_TRANSPOSED:
+                if MASK_N and MASK_K:
+                    b_mask = n_mask[None, :] & (k_offset[:, None] < k_remaining)
+                elif MASK_N:
+                    b_mask = n_mask[None, :]
+                elif MASK_K:
+                    b_mask = k_offset[:, None] < k_remaining
+                if IS_B_TRANSPOSED and (MASK_N or MASK_K):
                     b_mask = b_mask.T
 
             if USE_A_TENSOR_DESCRIPTOR:
                 a_block = a_desc.load([tile_m_idx, k * BLOCK_K])
             else:
                 a_block = tl.load(a_ptrs, mask=a_mask, other=0.0)
-        
+                
             if USE_B_TENSOR_DESCRIPTOR:
                 # TODO: .reshape is used because we're loading 3d [1, block1, block2] tiles
                 # this could be removed by taking a 2d view, but I'm pretty sure this
@@ -170,7 +185,10 @@ def m_grouped_gemm_inner_kernel(
                     b_block = b_ptr.load([problem_id, tile_n_idx, k * BLOCK_K])
                     b_block = tl.reshape(b_block, (BLOCK_N, BLOCK_K))    
             else:
-                b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
+                if MASK_N or MASK_K:
+                    b_block = tl.load(b_ptrs, mask=b_mask, other=0.0)
+                else:
+                    b_block = tl.load(b_ptrs)
 
             if IS_A_TRANSPOSED:
                 a_block = a_block.T
@@ -220,7 +238,7 @@ def m_grouped_gemm_inner_kernel(
                 epilogue_split_offset = i * PRE_ACT_SPLIT_N
                 tl.store(
                     pre_ptrs + epilogue_split_offset * preactivation_stride_2, 
-                    pre, 
+                    pre,
                     mask=token_mask[:, None] & (tile_n_idx + epilogue_split_offset + n_offset < N))
 
             out = activation(pre, EPILOGUE, None) if EPILOGUE is not None else pre
@@ -272,6 +290,7 @@ def m_grouped_gemm_persistent_kernel(
     RETURN_PREACTIVATION: tl.constexpr,
     IS_A_TRANSPOSED: tl.constexpr,
     IS_B_TRANSPOSED: tl.constexpr,
+    DIV_PERMUTE_INDICES: tl.constexpr,
     USE_A_TENSOR_DESCRIPTOR: tl.constexpr,
     USE_B_TENSOR_DESCRIPTOR: tl.constexpr,
     # Kernel parameters
@@ -297,10 +316,14 @@ def m_grouped_gemm_persistent_kernel(
     tl.assume(out_stride_2 > 0)
     
     for problem_id in tl.range(0, NUM_EXPERTS):
-        group_indices = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2), cache_modifier=".ca")
-        start_idx, end_idx = group_indices.split()
+        if problem_id == 0:
+            start_idx = 0
+            end_idx = tl.load(group_indices_ptr + problem_id)
+        else:
+            group_indices = tl.load(group_indices_ptr + problem_id + tl.arange(0, 2) - 1)
+            start_idx, end_idx = group_indices.split()
         m = end_idx - start_idx
-        
+            
         num_m_tiles = tl.cdiv(m, BLOCK_M)
         num_n_tiles: tl.constexpr = tl.cdiv(N, BLOCK_N)    
         num_tiles = tl.cast(num_m_tiles * num_n_tiles, tl.int32)
@@ -341,6 +364,7 @@ def m_grouped_gemm_persistent_kernel(
             RETURN_PREACTIVATION,
             IS_A_TRANSPOSED,
             IS_B_TRANSPOSED,
+            DIV_PERMUTE_INDICES,
             USE_A_TENSOR_DESCRIPTOR,
             USE_B_TENSOR_DESCRIPTOR,
             NUM_PROGRAMS,
@@ -352,7 +376,7 @@ def m_grouped_gemm_persistent_kernel(
             EPILOGUE_SPLIT,
             GRAD_ACT,
         )
-    
+        
         last_problem_end += num_tiles 
     
 _fast_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
@@ -367,11 +391,11 @@ _max_autotune_m_grouped_gemm_persistent_kernel = triton.autotune(
     reset_to_zero=['out_ptr']
 )(m_grouped_gemm_persistent_kernel)
 
-def m_grouped_gemm_default_config(e, params, dtype):
+def m_grouped_gemm_default_config_a30(e, params, dtype):
     BLOCK_M = 128
     BLOCK_N = 256
     BLOCK_K = 64
-    num_stages = 4
+    num_stages = 3
     if dtype == torch.float32:
         BLOCK_N //= 2
         num_stages -= 1
@@ -380,8 +404,8 @@ def m_grouped_gemm_default_config(e, params, dtype):
             "BLOCK_N": BLOCK_N, 
             "BLOCK_K": BLOCK_K, 
             "NUM_PROGRAMS": get_gpu_sm_count(),
-            "CACHE_GROUP_M": 0,
-            "EPILOGUE_SPLIT": 1,
+            "CACHE_GROUP_M": 8,
+            "EPILOGUE_SPLIT": 2,
             "USE_A_TENSOR_DESCRIPTOR": False,
             "USE_B_TENSOR_DESCRIPTOR": False
         },
@@ -389,6 +413,82 @@ def m_grouped_gemm_default_config(e, params, dtype):
         num_stages=num_stages
     )
     return default_config
+
+def m_grouped_gemm_default_config_a100_80gb(e, params, dtype):
+    BLOCK_M = 128
+    BLOCK_N = 256
+    BLOCK_K = 64
+    num_stages = 3
+    if dtype == torch.float32:
+        BLOCK_N //= 2
+        num_stages -= 1
+    default_config = triton.Config({
+            "BLOCK_M": BLOCK_M, 
+            "BLOCK_N": BLOCK_N, 
+            "BLOCK_K": BLOCK_K, 
+            "NUM_PROGRAMS": get_gpu_sm_count(),
+            "CACHE_GROUP_M": 6,
+            "EPILOGUE_SPLIT": 2,
+            "USE_A_TENSOR_DESCRIPTOR": False,
+            "USE_B_TENSOR_DESCRIPTOR": False
+        },
+        num_warps=8, 
+        num_stages=num_stages
+    )
+    """
+    if not params.gather and not params.scatter:
+        default_config = triton.Config({
+                "BLOCK_M": 128, 
+                "BLOCK_N": 256, 
+                "BLOCK_K": 64, 
+                "NUM_PROGRAMS": get_gpu_sm_count(),
+                "CACHE_GROUP_M": 0,
+                "EPILOGUE_SPLIT": 2,
+                "USE_A_TENSOR_DESCRIPTOR": False,
+                "USE_B_TENSOR_DESCRIPTOR": False
+            },
+            num_warps=8, 
+            num_stages=3
+        )
+    if params.gather:
+        default_config = triton.Config({
+                "BLOCK_M": 128, 
+                "BLOCK_N": 256, 
+                "BLOCK_K": 64,
+                "NUM_PROGRAMS": get_gpu_sm_count(),
+                "CACHE_GROUP_M": 0,
+                "EPILOGUE_SPLIT": 1,
+                "USE_A_TENSOR_DESCRIPTOR": False,
+                "USE_B_TENSOR_DESCRIPTOR": False
+            },
+            num_warps=8, 
+            num_stages=3
+        )
+    if params.scatter:
+        default_config = triton.Config({
+                "BLOCK_M": 128, 
+                "BLOCK_N": 256, 
+                "BLOCK_K": 64, 
+                "NUM_PROGRAMS": get_gpu_sm_count(),
+                "CACHE_GROUP_M": 0,
+                "EPILOGUE_SPLIT": 1,
+                "USE_A_TENSOR_DESCRIPTOR": False,
+                "USE_B_TENSOR_DESCRIPTOR": False
+            },
+            num_warps=8, 
+            num_stages=3
+        )
+        """
+    return default_config
+
+def get_default_config(e, params, dtype):
+    #name = torch.cuda.get_device_name()
+    #if "A30" in name:
+    #    return m_grouped_gemm_default_config_a30(e, params, dtype)
+    #elif "A100" in name:
+    return m_grouped_gemm_default_config_a100_80gb(e, params, dtype)
+    #else:
+    #    raise ValueError(f"No default config set for GPU: {name}")
 
 def _build_outputs(num_tokens, n, device, dtype, params: MGroupedGEMMParams):
     if params.gather or params.scatter:
@@ -434,7 +534,7 @@ def m_grouped_gemm(
     
     out, preactivation = _build_outputs(num_tokens, n, a.device, a.dtype, params)
     
-    default_config = m_grouped_gemm_default_config(b.size(0), params, a.dtype)
+    default_config = get_default_config(b.size(0), params, a.dtype)
     default_kwargs = default_config.all_kwargs()
     # torch.compile(fullgraph=True) does not supporting passing in num_ctas
     del default_kwargs["num_ctas"]
@@ -499,6 +599,7 @@ def m_grouped_gemm(
         RETURN_PREACTIVATION=params.return_preactivation,
         IS_A_TRANSPOSED=params.is_a_transposed,
         IS_B_TRANSPOSED=params.is_b_transposed,
+        DIV_PERMUTE_INDICES=params.div_permute_indices and not params.scatter,
         USE_A_TENSOR_DESCRIPTOR=use_a_tensor_descriptor,
         USE_B_TENSOR_DESCRIPTOR=use_b_tensor_descriptor,
         EPILOGUE=epilogue,

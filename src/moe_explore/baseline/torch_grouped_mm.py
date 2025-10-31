@@ -20,29 +20,34 @@ class TorchGroupedMMMoE(torch.nn.Module):
         self.num_experts = num_experts
         self.input_dim = input_dim
         
-        intermediate_dim = hidden_dim * 2 if "glu" in activation else hidden_dim
-        self.weight1 = torch.nn.Parameter(torch.empty(self.num_experts, input_dim, intermediate_dim, dtype=dtype))
-        self.weight2 = torch.nn.Parameter(torch.empty(self.num_experts, hidden_dim, input_dim, dtype=dtype))
-                
+        # currently only implement GLUs
+        assert "glu" in activation
+        if "glu" in activation:
+            self.weight1 = torch.nn.Parameter(torch.empty(self.num_experts, input_dim, hidden_dim, dtype=dtype))
+            self.weight2 = torch.nn.Parameter(torch.empty(self.num_experts, input_dim, hidden_dim, dtype=dtype))
+            self.weight3 = torch.nn.Parameter(torch.empty(self.num_experts, hidden_dim, input_dim, dtype=dtype))
+                    
     def init_weights(self, weight1, weight2):
-        self.weight1.data[:] = weight1
-        self.weight2.data[:] = weight2
+        self.weight1.data[:] = weight1[..., 0::2]
+        self.weight2.data[:] = weight1[..., 1::2]
+        self.weight3.data[:] = weight2[:]
         
     def forward(
         self,
         tokens: torch.Tensor,
         router,
     ):
-        assert tokens.dim() == 2
-        topk_scores, topk_indices, _ = router(tokens)
+        topk_scores, topk_indices, router_logits = router(tokens)
         grouped_tokens = expert_input_permute(
             tokens,
             topk_indices,
             self.num_experts,
-            self.topk
+            self.topk,
+            zero_prefix=False
         )
-        output = torch._grouped_mm(grouped_tokens.tokens, self.weight1, grouped_tokens.group_indices[1:])    
-        output = activation_func(output, self.activation)
-        grouped_tokens.tokens = torch._grouped_mm(output, self.weight2, grouped_tokens.group_indices[1:])
+        gate = torch._grouped_mm(grouped_tokens.tokens, self.weight1, grouped_tokens.group_indices)    
+        up = torch._grouped_mm(grouped_tokens.tokens, self.weight2, grouped_tokens.group_indices)
+        output = activation_func((gate, up), self.activation)
+        grouped_tokens.tokens = torch._grouped_mm(output, self.weight3, grouped_tokens.group_indices)
         output = expert_output_permute(grouped_tokens, topk_scores, self.topk, tokens.shape)
-        return output
+        return output, router_logits
