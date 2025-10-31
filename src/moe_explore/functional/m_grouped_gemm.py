@@ -96,7 +96,6 @@ def m_grouped_gemm_backward(
         gather_b=forward_scatter,
         num_tokens=num_tokens,
         topk=topk,
-        activation=None
     )
     grad_weight = triton_k_grouped_gemm(tokens, grad_output, group_indices, grad_weight_params)
 
