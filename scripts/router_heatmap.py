@@ -6,7 +6,7 @@ import torch
 from typing import Optional
 
 plt.rcParams['figure.constrained_layout.use'] = True
-seaborn.set_theme(font_scale=1.1)
+seaborn.set_theme(font_scale=1.2)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-l", "--load-pt", type=str, required=True)
@@ -52,8 +52,9 @@ fig_name = f"{'_'.join(fig_name_parts)}.pdf"
 print(f"Saving to {fig_name}")
 
 plt.savefig(fig_name, transparent=True)
+plt.close()
 
-for idx in range(expert_percentages.shape[0]):
-    min_perc = expert_percentages[idx].min()
-    max_perc = expert_percentages[idx].max()
-    print(f"layer {idx}: min={min_perc}, max={max_perc}")
+#for idx in range(expert_percentages.shape[0]):
+#    min_perc = expert_percentages[idx].min()
+#    max_perc = expert_percentages[idx].max()
+#    print(f"layer {idx}: min={min_perc}, max={max_perc}")

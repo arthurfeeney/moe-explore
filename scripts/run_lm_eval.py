@@ -42,8 +42,7 @@ task_manager = lm_eval.tasks.TaskManager()
 results = lm_eval.simple_evaluate(
     model=lm_model,
     tasks=[
-        #"gsm8k"
-        #"sciq",
+        "sciq",
         "hellaswag"
     ],
     num_fewshot=0,
